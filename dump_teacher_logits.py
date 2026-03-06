@@ -71,7 +71,7 @@ def main():
     #teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, "multilabel", num_out, rank=0)
     teacher, _kind = load_teacher_model_for_eval(
         args=argparse.Namespace(
-            teacher_arch="physiowave",
+            teacher_model="physiowave",
             teacher_checkpoint=args.teacher_checkpoint,
             task_type="classification",           # "multilabel" or "classification"
             waveformer_patch_width=64,          # unused here; keep something

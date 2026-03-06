@@ -15,11 +15,12 @@
   "accum_steps": 1,
   "alpha_kd": 0.2,
   "num_workers": 1,
+  "student_dataset_profile": "chapman",
   "student_kernel_set": "7",
   "student_arch": "physiowavenpu",
   "pp_mode": "none",
   "pp_apply_to": "none",
   "teacher_logits_h5": "chapman_logits.h5",
-  "teacher_arch": "physiowave",
+  "teacher_model": "physiowave",
   "task_type": "multilabel"
 }

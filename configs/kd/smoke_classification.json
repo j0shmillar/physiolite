@@ -17,5 +17,6 @@
   "threshold": 0.3,
   "num_workers": 0,
   "output_dir": "smoke_run_output",
-  "scheduler": "none"
+  "scheduler": "none",
+  "teacher_model": "physiowave"
 }

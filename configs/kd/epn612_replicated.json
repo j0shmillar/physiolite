@@ -17,5 +17,7 @@
   "task_type": "classification",
   "alpha_kd": 0.2,
   "num_workers": 1,
-  "student_arch": "physiowavenpu"
+  "student_dataset_profile": "epn612",
+  "student_arch": "physiowavenpu",
+  "teacher_model": "physiowave"
 }

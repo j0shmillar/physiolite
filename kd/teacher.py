@@ -4,7 +4,7 @@ import os
 
 import torch
 
-from model import BERTWaveletTransformer
+from models.physiowave import BERTWaveletTransformer
 from .common import patch_wavelet_modules_io
 
 
@@ -174,6 +174,12 @@ def load_physiowave():
 
 @torch.no_grad()
 def load_teacher_model_for_eval(args, device: torch.device, num_outputs: int, rank: int):
+    teacher_model = getattr(args, "teacher_model", "physiowave")
+    if teacher_model != "physiowave":
+        raise NotImplementedError(
+            "kd.teacher.load_teacher_model_for_eval currently supports teacher_model='physiowave' only. "
+            "Use run_kd.py for multi-backbone teacher selection during KD."
+        )
     teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, num_outputs, rank=rank)
     teacher = teacher.to(device).eval()
     for p in teacher.parameters():

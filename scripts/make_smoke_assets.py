@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 import torch
 
-from model import BERTWaveletTransformer
+from models.physiowave import BERTWaveletTransformer
 
 
 def write_h5(path: str, x: np.ndarray, y: np.ndarray) -> None:

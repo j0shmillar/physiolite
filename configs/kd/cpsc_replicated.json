@@ -16,5 +16,7 @@
   "accum_steps": 1,
   "task_type": "classification",
   "alpha_kd": 0.2,
-  "student_arch": "physiowavenpu"
+  "student_dataset_profile": "cpsc",
+  "student_arch": "physiowavenpu",
+  "teacher_model": "physiowave"
 }

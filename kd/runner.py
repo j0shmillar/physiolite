@@ -1,7 +1,7 @@
 # kd/runner.py
 """
 Knowledge Distillation for ECG/sEMG (single-label OR multilabel):
-  Teacher: BERTWaveletTransformer (checkpoint)
+  Teacher: configurable via --teacher_model (default: physiowave/BERTWaveletTransformer)
   Student: one of:
     - physiowavenpu  (your NPU-friendly model)
     - waveformer     (ForeverBlue816/WaveFormer)
@@ -27,6 +27,7 @@ import argparse
 import random
 import json
 import importlib.util
+from copy import deepcopy
 from contextlib import nullcontext
 from typing import Any
 
@@ -54,7 +55,7 @@ from sklearn.metrics import (
 )
 
 # Your project imports
-from model import BERTWaveletTransformer
+from models.physiowave import BERTWaveletTransformer
 from models.vit_pw import PhysioWaveNPU
 from dataset_multilabel import (
     SingleLabelTimeSeriesDataset,
@@ -226,6 +227,57 @@ def parse_kernel_set(s: str) -> tuple[int, ...]:
         if k <= 0 or (k % 2 == 0):
             raise ValueError(f"Invalid kernel size {k} in --student_kernel_set (must be positive odd).")
     return ks
+
+
+STUDENT_DATASET_PROFILES = {
+    "uci": {"patch_t": 4, "front_pool_k": 3, "post_patch_pool_t": 5, "student_pos_freqs": 8},
+    "db5": {"patch_t": 8, "front_pool_k": 4, "post_patch_pool_t": 2, "student_pos_freqs": 8},
+    "epn612": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
+    "ptb": {"patch_t": 8, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
+    "cpsc": {"patch_t": 8, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
+    "chapman": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 8, "student_pos_freqs": 8},
+}
+
+
+def infer_student_dataset_profile(train_file: str) -> str:
+    s = str(train_file).lower()
+    if "uci_emg" in s:
+        return "uci"
+    if "db5" in s or "ninapro" in s:
+        return "db5"
+    if "epn612" in s:
+        return "epn612"
+    if "ptb" in s or "ptb-xl" in s:
+        return "ptb"
+    if "cpsc" in s:
+        return "cpsc"
+    if "chapman" in s or "shaoxing" in s:
+        return "chapman"
+    return "none"
+
+
+def apply_student_dataset_profile(args, rank: int):
+    profile = args.student_dataset_profile
+    if profile == "auto":
+        profile = infer_student_dataset_profile(args.train_file)
+        if rank == 0:
+            print(f">> Auto-selected student dataset profile: {profile}")
+    if profile == "none":
+        return
+
+    cfg = STUDENT_DATASET_PROFILES[profile]
+    args.patch_size = int(cfg["patch_t"])
+    args.student_front_pool_k = int(cfg["front_pool_k"])
+    args.student_post_patch_pool_t = int(cfg["post_patch_pool_t"])
+    args.student_pos_freqs = int(cfg["student_pos_freqs"])
+    if rank == 0:
+        print(
+            ">> Applied student profile "
+            f"'{profile}': patch_t={args.patch_size}, "
+            f"front_pool_k={args.student_front_pool_k}, "
+            f"post_patch_pool_t={args.student_post_patch_pool_t}, "
+            f"student_pos_freqs={args.student_pos_freqs}"
+        )
 
 def unwrap_ddp(m):
     return m.module if hasattr(m, "module") else m
@@ -1271,6 +1323,8 @@ def build_student(args, train_ds, device, rank):
     pe_cache = None
 
     if args.student_arch == "physiowavenpu":
+        apply_student_dataset_profile(args, rank)
+
         depth = int(args.student_depth)  # allow 0,1,3
         embed = int(args.student_embed_dim)
 
@@ -1279,6 +1333,22 @@ def build_student(args, train_ds, device, rank):
         # If PosEnc disabled, pe_cache is None and C_total == in_channels.
         pos_freqs = int(args.student_pos_freqs)
         C_total = int(args.in_channels) + 2 * pos_freqs
+        if args.print_student_config and rank == 0:
+            print(">> Resolved student config:")
+            print(f"   student_arch={args.student_arch}")
+            print(f"   student_dataset_profile={args.student_dataset_profile}")
+            print(f"   in_channels_raw={args.in_channels}")
+            print(f"   student_pos_freqs={pos_freqs}")
+            print(f"   C_total={C_total}")
+            print(f"   input_length={args.max_length}")
+            print(f"   patch_t={args.patch_size}")
+            print(f"   front_pool_k={args.student_front_pool_k}")
+            print(f"   post_patch_pool_t={args.student_post_patch_pool_t}")
+            print(f"   student_bank_ch={args.student_bank_ch}")
+            print(f"   student_kernel_set={args.student_kernel_set}")
+            print(f"   student_embed_dim={args.student_embed_dim}")
+            print(f"   student_depth={args.student_depth}")
+            print(f"   student_reduce={args.student_reduce}")
 
         student = PhysioWaveNPU(
             input_length=args.max_length,
@@ -1292,7 +1362,8 @@ def build_student(args, train_ds, device, rank):
             reduce=args.student_reduce,
             conv1d_k=3,
             head_residual=False,
-            post_patch_pool_t=5
+            front_pool_k=args.student_front_pool_k,
+            post_patch_pool_t=args.student_post_patch_pool_t,
         ).to(device)
 
         pe_cache = make_posenc_1d_concat(pos_freqs, args.max_length, device=device)
@@ -1383,6 +1454,67 @@ def build_student(args, train_ds, device, rank):
         return m, None
 
     raise ValueError(f"Unknown student_arch: {args.student_arch}")
+
+
+def _extract_checkpoint_state_dict(ckpt_obj):
+    return ckpt_obj.get("student_state_dict") or ckpt_obj.get("model_state_dict") or ckpt_obj.get("state_dict") or ckpt_obj
+
+
+def build_teacher_model(args, train_ds, device, rank, kd_outputs):
+    """
+    Build teacher for online KD logits.
+    - teacher_model=physiowave: loads BERTWavelet teacher via --teacher_checkpoint
+    - teacher_model=<other backbone>: reuses student builder for that backbone, then loads --teacher_checkpoint state dict.
+    """
+    teacher_pe_cache = None
+
+    if args.teacher_model == "physiowave":
+        teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, kd_outputs, rank=rank)
+        teacher = teacher.to(device)
+        patch_wavelet_modules_io(teacher, rank=rank)
+    else:
+        t_args = deepcopy(args)
+        t_args.student_arch = args.teacher_model
+        if args.teacher_dataset_profile != "none":
+            t_args.student_dataset_profile = args.teacher_dataset_profile
+        teacher, teacher_pe_cache = build_student(t_args, train_ds, device, rank)
+
+        ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
+        sd = _extract_checkpoint_state_dict(ckpt)
+        missing, unexpected = unwrap_ddp(teacher).load_state_dict(sd, strict=False)
+        if rank == 0:
+            print(
+                f">> Loaded teacher ({args.teacher_model}) from checkpoint. "
+                f"Missing={len(missing)}, Unexpected={len(unexpected)}"
+            )
+
+    teacher = teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad = False
+    return teacher, teacher_pe_cache
+
+
+def forward_model_logits(model, x, *, arch, args, pe_cache=None, pe_scale=0.1):
+    x_used = x
+    if arch in ("ecgfm", "ecgfounder", "clef", "hubertecg", "fcn", "bilstm", "ai85tcn1d"):
+        x_used = zscore_per_sample_channel(x_used)
+
+    x_in = make_student_input(x_used, arch=arch, pe_cache=pe_cache, pe_scale=pe_scale)
+    if arch == "waveformer":
+        x_in, pos_embed_y = make_waveformer_pos_embed_y(
+            x_in, patch_height=1, patch_width=args.waveformer_patch_width, domain_offset=0
+        )
+        logits = model(x_in, pos_embed_y)
+    elif arch == "physiowave":
+        logits = model(x_in, task="downstream", task_name=args.task_type, return_logits=True)
+    else:
+        logits = model(x_in)
+
+    if isinstance(logits, (tuple, list)):
+        logits = logits[0]
+    if isinstance(logits, dict):
+        logits = logits.get("logits", None) or logits.get("preds", None) or logits.get("y_hat", None) or next(iter(logits.values()))
+    return logits
 
 # ----------------------------
 # AI8X/MAX78000-friendly 1D CNN + TCN baseline
@@ -1995,37 +2127,6 @@ def load_physiowave():
 
     return model, None
 
-@torch.no_grad()
-def load_teacher_model_for_eval(args, device: torch.device, num_outputs: int, rank: int):
-    """
-    Loads teacher model for sanity evaluation on test data.
-
-    - teacher_arch=bertwavelet: expects a BERTWaveletTransformer checkpoint compatible with build_teacher_for_kd()
-    - teacher_arch=physiowave : expects a checkpoint saved by this script (best_student.pth) and loads via load_physiowave()
-    """
-    #if args.teacher_arch == "physiowave":
-    #    # Build the exact PhysioWave config you hardcoded in load_physiowave()
-    #    teacher, _ = load_physiowave()
-    #
-    #    ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
-    #    sd = ckpt.get("student_state_dict") or ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
-    #
-    #    # strict=True is good here: we want to know if something is wrong
-    #    teacher.load_state_dict(sd, strict=True)
-    #    teacher = teacher.to(device).eval()
-    #    for p in teacher.parameters():
-    #        p.requires_grad = False
-    #    patch_wavelet_modules_io(teacher, rank=rank)
-    #    return teacher, "physiowave"
-
-    # default: original builder (BERTWaveletTransformer teacher checkpoint)
-    teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, num_outputs, rank=rank)
-    teacher = teacher.to(device).eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
-    patch_wavelet_modules_io(teacher, rank=rank)
-    return teacher, "bertwavelet"
-
 # ----------------------------
 # Main worker
 # ----------------------------
@@ -2051,7 +2152,7 @@ from .data import (
 )
 from .losses import CEPlusSoftF1Macro, kd_bce_with_logits, kd_ce
 from .schedulers import WarmupCosineSchedule
-from .teacher import build_teacher_for_kd, load_physiowave, load_teacher_model_for_eval
+from .teacher import build_teacher_for_kd, load_physiowave
 
 
 def main_worker(rank, world_size, args):
@@ -2179,19 +2280,9 @@ def main_worker(rank, world_size, args):
 
     # Teacher
     teacher = None
+    teacher_pe_cache = None
     if (args.alpha_kd > 0) and (not use_cached_teacher):
-        # TODO, only if dataset = db5 should we use load_physiowave
-        teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, kd_outputs, rank=rank)
-        teacher = teacher.to(device).eval()
-        for p in teacher.parameters():
-            p.requires_grad = False
-        #teacher, _ = load_physiowave()  # builds the exact PhysioWave architecture you used
-        #ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
-        #sd = ckpt.get("student_state_dict") or ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
-        #teacher.load_state_dict(sd, strict=True)
-        #teacher = teacher.to(device).eval()
-        #for p in teacher.parameters():
-        #    p.requires_grad = False
+        teacher, teacher_pe_cache = build_teacher_model(args, train_ds, device, rank, kd_outputs)
     elif use_cached_teacher and rank == 0:
         print(">> Skipping online teacher forward (cached logits will be used).")
 
@@ -2322,8 +2413,8 @@ def main_worker(rank, world_size, args):
     if rank == 0 and args.sanity_teacher_test and test_loader is not None:
         print("\n===> SANITY: Evaluating TEACHER on TEST split <===")
 
-        teacher_model, teacher_kind = load_teacher_model_for_eval(
-            args, device=device, num_outputs=kd_outputs, rank=rank
+        teacher_model, teacher_eval_pe_cache = build_teacher_model(
+            args, train_ds, device, rank, kd_outputs
         )
 
         # simple criterion for reporting loss (doesn't affect metrics)
@@ -2341,11 +2432,11 @@ def main_worker(rank, world_size, args):
             device=device,
             criterion=teacher_crit,
             threshold=args.threshold,
-            desc_prefix=f"Teacher({teacher_kind}) TEST",
+            desc_prefix=f"Teacher({args.teacher_model}) TEST",
             task_type=args.task_type,
-            pe_cache=None,
-            student_arch=("physiowave" if teacher_kind == "physiowave" else "physiowave"),  # see note below
-            pe_scale=0.0,
+            pe_cache=teacher_eval_pe_cache,
+            student_arch=args.teacher_model,
+            pe_scale=args.teacher_pe_scale,
             waveformer_patch_width=args.waveformer_patch_width,
             amp_enabled=False,
             amp_dtype=(torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16),
@@ -2397,7 +2488,14 @@ def main_worker(rank, world_size, args):
                 elif teacher is not None:
                     with torch.inference_mode():
                         with autocast_ctx(enabled=(amp_enabled and device.type == "cuda"), dtype=amp_dtype):
-                            t_logits = teacher(x_used, task="downstream", task_name=args.task_type, return_logits=True)
+                            t_logits = forward_model_logits(
+                                teacher,
+                                x_used,
+                                arch=args.teacher_model,
+                                args=args,
+                                pe_cache=teacher_pe_cache,
+                                pe_scale=args.teacher_pe_scale,
+                            )
 
                 # Student input formatting
                 x_in = make_student_input(x_used, arch=args.student_arch, pe_cache=pe_cache, pe_scale=args.student_pe_scale)
@@ -2617,15 +2715,46 @@ def main(argv=None):
             "fcn", "tcn", "bilstm", "convnext1d", "ai85tcn1d"
         ],
     )
+    p.add_argument(
+        "--teacher_model",
+        type=str,
+        default="physiowave",
+        choices=[
+            "physiowave",
+            "physiowavenpu", "waveformer", "otis", "tinymyo",
+            "ecgfm", "ecgfounder", "clef", "hubertecg",
+            "fcn", "tcn", "bilstm", "convnext1d", "ai85tcn1d",
+        ],
+        help="Teacher backbone used for KD logits. 'physiowave' uses the original BERTWavelet teacher loader.",
+    )
 
     # PhysioWaveNPU
+    p.add_argument(
+        "--student_dataset_profile",
+        type=str,
+        default="none",
+        choices=["none", "auto", "uci", "db5", "epn612", "ptb", "cpsc", "chapman"],
+        help="Dataset-tuned PhysioWaveNPU settings. When set, overrides patch/front-pool/post-pool/pos-freqs.",
+    )
     p.add_argument("--patch_size", type=int, default=40)
     p.add_argument("--student_embed_dim", type=int, default=256)
     p.add_argument("--student_depth", type=int, default=3)
     p.add_argument("--student_bank_ch", type=int, default=16)
     p.add_argument("--student_reduce", type=int, default=4)
     p.add_argument("--student_pos_freqs", type=int, default=8)
+    p.add_argument("--student_front_pool_k", type=int, default=4)
+    p.add_argument("--student_post_patch_pool_t", type=int, default=5)
     p.add_argument("--student_pe_scale", type=float, default=0.1)
+    p.add_argument("--print_student_config", action="store_true", default=False,
+                   help="Print resolved student model config (after profile overrides) before build.")
+    p.add_argument(
+        "--teacher_dataset_profile",
+        type=str,
+        default="none",
+        choices=["none", "auto", "uci", "db5", "epn612", "ptb", "cpsc", "chapman"],
+        help="Optional dataset profile override for teacher_model=physiowavenpu.",
+    )
+    p.add_argument("--teacher_pe_scale", type=float, default=0.1)
 
     p.add_argument(
         "--student_kernel_set",
@@ -2726,9 +2855,6 @@ def main(argv=None):
                 help="Dataset key inside HDF5 (default: teacher_logits).")
     p.add_argument("--sanity_teacher_test", action="store_true", default=False,
                 help="Run a one-off teacher evaluation on the TEST split before training.")
-    p.add_argument("--teacher_arch", type=str, default="bertwavelet",
-                choices=["bertwavelet", "physiowave"],
-                help="How to load --teacher_checkpoint for the sanity test.")
     
     if pre_args.config:
         config_defaults = _load_config_defaults(pre_args.config)
