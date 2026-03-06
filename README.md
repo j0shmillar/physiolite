@@ -27,7 +27,7 @@ Legacy KD scripts were removed.
 - `kd/schedulers.py`: LR schedulers
 - `kd/teacher.py`: teacher model loading/building helpers
 - `dataset_multilabel.py`: core HDF5 dataset classes/collate
-- `dproc_final.py`, `dproc_final_with_filtering.py`: DB5 preprocessing
+- `data_prep/`: all dataset preprocessing scripts (EMG + ECG)
 
 ## Environment
 
@@ -48,10 +48,10 @@ Expected HDF5 layout for training:
 
 ### EMG datasets
 
-#### 1) UCI EMG for Gestures (CLI preprocessing)
+#### 1) UCI EMG for Gestures (single merged script)
 
 ```bash
-python EMG/uci_preprocess.py \
+python data_prep/uci_emg_preprocess.py \
   --root_dir ../datasets/UCI_EMG_for_Gestures/EMG_data_for_gestures-master \
   --out_dir ./UCI_EMG_processed_v2 \
   --seq_len 600 \
@@ -69,29 +69,29 @@ Outputs:
 - `UCI_EMG_processed_v2/uci_emg_val.h5`
 - `UCI_EMG_processed_v2/uci_emg_test.h5`
 
-Filtered variant:
+Filtered mode (optional):
 
 ```bash
-python EMG/uci_preprocess_with_filtering.py \
+python data_prep/uci_emg_preprocess.py \
   --root_dir ../datasets/UCI_EMG_for_Gestures/EMG_data_for_gestures-master \
   --out_dir ./UCI_EMG_processed_v2_filtered \
+  --enable_filtering \
   --fs 1000 \
   --seq_len 600 \
   --val_subjects "33-34" \
   --test_subjects "35-36"
 ```
 
-#### 2) EPN612 (script with in-file path constants)
-
-`EMG/epn_finetune.py` currently uses hardcoded paths:
-- `source_training = "./EMG-EPN612 Dataset/trainingJSON"`
-- `source_testing  = "./EMG-EPN612 Dataset/testingJSON"`
-- `dest_folder     = "./EPN612_processed"`
+#### 2) EPN612
 
 Run:
 
 ```bash
-python EMG/epn_finetune.py
+python data_prep/epn612_preprocess.py \
+  --source_training "./EMG-EPN612 Dataset/trainingJSON" \
+  --source_testing "./EMG-EPN612 Dataset/testingJSON" \
+  --out_dir "./EPN612_processed" \
+  --seq_len 1024
 ```
 
 Outputs:
@@ -101,15 +101,14 @@ Outputs:
 
 ### ECG datasets
 
-#### 1) PTB-XL (script with in-file root path constant)
-
-`ECG/ptbxl_finetune.py` uses:
-- `root = 'physionet.org/files/ptb-xl/1.0.3/'`
+#### 1) PTB-XL
 
 Run:
 
 ```bash
-python ECG/ptbxl_finetune.py
+python data_prep/ptbxl_preprocess.py \
+  --root "physionet.org/files/ptb-xl/1.0.3/" \
+  --threshold 80
 ```
 
 Outputs (under the same `root` path):
@@ -117,16 +116,25 @@ Outputs (under the same `root` path):
 - `val.h5`
 - `test.h5`
 
-#### 2) NinaPro DB5 (ECG/EMG-style windowed H5 generation used in experiments)
+#### 2) NinaPro DB5 (merged filtered/unfiltered script)
 
 ```bash
-python dproc_final.py --input_data ../ninapro_db5/raw/ --output_h5 test1_db5 --window_size 512 --stride 64
+python data_prep/db5_preprocess.py \
+  --input_data ../ninapro_db5/raw/ \
+  --output_h5 test1_db5 \
+  --window_size 512 \
+  --stride 64
 ```
 
-Filtered variant:
+Filtered mode (optional):
 
 ```bash
-python dproc_final_with_filtering.py --help
+python data_prep/db5_preprocess.py \
+  --input_data ../ninapro_db5/raw/ \
+  --output_h5 test1_db5_filtered \
+  --window_size 512 \
+  --stride 64 \
+  --enable_filtering
 ```
 
 #### 3) CPSC / Chapman-Shaoxing
@@ -189,6 +197,8 @@ Each run writes to `--output_dir`:
 
 ```bash
 python run_kd.py --help
-python dproc_final.py --help
-python dproc_final_with_filtering.py --help
+python data_prep/uci_emg_preprocess.py --help
+python data_prep/epn612_preprocess.py --help
+python data_prep/ptbxl_preprocess.py --help
+python data_prep/db5_preprocess.py --help
 ```
