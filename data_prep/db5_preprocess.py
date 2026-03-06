@@ -4,18 +4,16 @@ NinaPro DB5 data processor (leakage-safe, repetition-safe, numerically safe)
 
 End-to-end script that:
 - Selects N channels (default 8; first or last armband)
-- Applies zero-phase bandpass + notch filtering on raw continuous sEMG
+- Optionally applies zero-phase bandpass + notch filtering on raw continuous sEMG
 - Prevents normalization leakage by computing per-subject per-channel μ/σ from TRAIN repetitions only
 - Windows strictly *within contiguous repetition runs* (no cross-repetition leakage/contamination)
 - Standardizes each channel via per-channel z-score normalization
 - Hardens normalization to avoid NaN/Inf (std clamp + clip + finite asserts)
 - Writes label_map.json (raw -> consecutive)
 
-Requested preprocessing:
-  Raw sEMG recordings are first filtered and normalized.
-  - zero-phase bandpass (e.g., 20–450 Hz, 4th order)
-  - notch (50/60 Hz, Q=30)
-  - per-channel z-score normalization
+Filtering behavior:
+  - Default: no filtering (unfiltered pipeline)
+  - If --enable_filtering: apply zero-phase bandpass + notch before normalization
 
 NOTE: if fs is too low for band_high (e.g. DB5 fs=200 -> Nyquist=100),
       band_high is clamped to 0.95*Nyquist automatically.
@@ -338,7 +336,9 @@ def main():
     ap.add_argument("--channel_mode", type=str, default="first", choices=["first", "last"],
                     help="Select first N or last N channels (armband choice)")
 
-    # --- Filtering knobs (requested preprocessing) ---
+    # --- Optional filtering knobs ---
+    ap.add_argument("--enable_filtering", action="store_true",
+                    help="Apply bandpass + notch filtering before normalization.")
     ap.add_argument("--band_low", type=float, default=20.0, help="Bandpass low cutoff (Hz)")
     ap.add_argument("--band_high", type=float, default=90.0, help="Bandpass high cutoff (Hz)")
     ap.add_argument("--band_order", type=int, default=4, help="Bandpass Butterworth order")
@@ -359,8 +359,11 @@ def main():
     print(f"FS={args.fs} Hz | window={args.window_size} ({args.window_size/args.fs:.3f}s)"
           f" | stride={args.stride} ({args.stride/args.fs:.3f}s)")
     print(f"Channels: {args.channels} mode={args.channel_mode}")
-    print(f"Filtering: bandpass {args.band_low}-{args.band_high} Hz (order={args.band_order}), "
-          f"notch {args.notch_freq} Hz (Q={args.notch_q})")
+    if args.enable_filtering:
+        print(f"Filtering: ON (bandpass {args.band_low}-{args.band_high} Hz, "
+              f"order={args.band_order}; notch {args.notch_freq} Hz, Q={args.notch_q})")
+    else:
+        print("Filtering: OFF")
     if args.split_type == "repetition":
         print("Repetition split: train {1,3,4,6}, val {2}, test {5}")
 
@@ -391,25 +394,28 @@ def main():
             print(f"  [{subj}] no usable files; skip")
             continue
 
-        # 1) Filter all files (continuous) first (zero-phase bandpass + notch)
-        files_filt = []
+        # 1) Optional filter pass over continuous recordings
+        files_proc = []
         for (mf, emg, lab, rep) in files_data:
-            emg_f = filter_emg_zero_phase(
-                emg,
-                fs=float(args.fs),
-                band_low=float(args.band_low),
-                band_high=float(args.band_high),
-                band_order=int(args.band_order),
-                notch_freq=float(args.notch_freq),
-                notch_q=float(args.notch_q),
-            )
+            if args.enable_filtering:
+                emg_f = filter_emg_zero_phase(
+                    emg,
+                    fs=float(args.fs),
+                    band_low=float(args.band_low),
+                    band_high=float(args.band_high),
+                    band_order=int(args.band_order),
+                    notch_freq=float(args.notch_freq),
+                    notch_q=float(args.notch_q),
+                )
+            else:
+                emg_f = emg
             if not np.isfinite(emg_f).all():
-                raise ValueError(f"Non-finite values after filtering in {subj}/{mf}")
-            files_filt.append((mf, emg_f, lab, rep))
+                raise ValueError(f"Non-finite values after preprocessing in {subj}/{mf}")
+            files_proc.append((mf, emg_f, lab, rep))
 
         # 2) Compute per-subject per-channel μ/σ using TRAIN repetitions only (leakage-safe)
         train_segments = []
-        for (mf, emg_f, lab, rep) in files_filt:
+        for (mf, emg_f, lab, rep) in files_proc:
             mask_train = np.isin(rep, TRAIN_REPEATS)
             for s, e in contiguous_runs(mask_train):
                 seg = emg_f[s:e, :]
@@ -424,7 +430,7 @@ def main():
 
         # 3) Normalize + window within repetitions
         Xs_subj, ys_subj, rs_subj = [], [], []
-        for (mf, emg_f, lab, rep) in files_filt:
+        for (mf, emg_f, lab, rep) in files_proc:
             emg_n = zscore_apply_per_channel(emg_f, mu, std)
             if not np.isfinite(emg_n).all():
                 raise ValueError(f"Non-finite values after normalization in {subj}/{mf}")

@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+import argparse
 import h5py
 import numpy as np
 from tqdm.auto import tqdm
@@ -159,11 +160,17 @@ def process_testing_json(source_folder, seq_len, train_data, train_labels, test_
                     test_labels.append(label)
 
 def main():
-    # Define paths
-    source_training = "./EMG-EPN612 Dataset/trainingJSON"  # Path to training JSON folder
-    source_testing = "./EMG-EPN612 Dataset/testingJSON"    # Path to testing JSON folder
-    dest_folder = "./EPN612_processed"               # Output folder
-    seq_len = 1024                                   # Sequence length in samples
+    ap = argparse.ArgumentParser(description="Preprocess EPN612 JSON dataset into HDF5 splits.")
+    ap.add_argument("--source_training", type=str, default="./EMG-EPN612 Dataset/trainingJSON")
+    ap.add_argument("--source_testing", type=str, default="./EMG-EPN612 Dataset/testingJSON")
+    ap.add_argument("--out_dir", type=str, default="./EPN612_processed")
+    ap.add_argument("--seq_len", type=int, default=1024)
+    args = ap.parse_args()
+
+    source_training = args.source_training
+    source_testing = args.source_testing
+    dest_folder = args.out_dir
+    seq_len = args.seq_len
 
     # Create output directory
     os.makedirs(dest_folder, exist_ok=True)

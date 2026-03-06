@@ -1,5 +1,6 @@
 import os
 import ast
+import argparse
 import h5py
 import numpy as np
 import pandas as pd
@@ -273,8 +274,12 @@ def process_split(df, root, out_file, diag_map, threshold=50.0):
 # 8. Main function
 # ------------------------------------------------------
 def main():
-    # PTB-XL dataset root directory
-    root = 'physionet.org/files/ptb-xl/1.0.3/'  # Update to your PTB-XL directory
+    ap = argparse.ArgumentParser(description="Preprocess PTB-XL into train/val/test HDF5 files.")
+    ap.add_argument("--root", type=str, default="physionet.org/files/ptb-xl/1.0.3/")
+    ap.add_argument("--threshold", type=float, default=80.0, help="SCP likelihood threshold")
+    args = ap.parse_args()
+
+    root = args.root
     
     # Load database and diagnostic mapping
     df = pd.read_csv(os.path.join(root, 'ptbxl_database.csv'))
@@ -305,7 +310,7 @@ def main():
         out_file = os.path.join(root, f'{name}.h5')
         print(f'\n{"="*50}')
         print(f'Processing {name} split...')
-        process_split(subdf, root, out_file, diag_map, threshold=80.0)
+        process_split(subdf, root, out_file, diag_map, threshold=args.threshold)
         print(f'Saved to: {out_file}')
 
     print(f'\n{"="*50}')

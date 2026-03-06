@@ -28,6 +28,7 @@ Legacy KD scripts were removed.
 - `kd/teacher.py`: teacher model loading/building helpers
 - `dataset_multilabel.py`: core HDF5 dataset classes/collate
 - `data_prep/`: all dataset preprocessing scripts (EMG + ECG)
+- `data_prep/README.md`: preprocessing quick-reference
 
 ## Environment
 
