@@ -263,6 +263,11 @@ def apply_student_dataset_profile(args, rank: int):
         if rank == 0:
             print(f">> Auto-selected student dataset profile: {profile}")
     if profile == "none":
+        if rank == 0:
+            print(
+                "!! WARNING: student dataset profile is 'none'. "
+                "Using raw CLI values for patch/front/post-pool/pos-freqs."
+            )
         return
 
     cfg = STUDENT_DATASET_PROFILES[profile]
@@ -2732,7 +2737,7 @@ def main(argv=None):
     p.add_argument(
         "--student_dataset_profile",
         type=str,
-        default="none",
+        default="auto",
         choices=["none", "auto", "uci", "db5", "epn612", "ptb", "cpsc", "chapman"],
         help="Dataset-tuned PhysioWaveNPU settings. When set, overrides patch/front-pool/post-pool/pos-freqs.",
     )

@@ -189,6 +189,8 @@ PhysioWaveNPU dataset profiles (applies `patch_t`, `front_pool_k`, `post_patch_p
 - `cpsc`
 - `chapman`
 
+Default is `--student_dataset_profile auto` (inferred from `--train_file` path).
+
 Example with explicit profile:
 
 ```bash
