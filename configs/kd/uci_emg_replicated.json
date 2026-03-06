@@ -1,0 +1,20 @@
+{
+  "train_file": "UCI_EMG_processed_v2/uci_emg_train.h5",
+  "val_file": "UCI_EMG_processed_v2/uci_emg_val.h5",
+  "test_file": "UCI_EMG_processed_v2/uci_emg_test.h5",
+  "teacher_checkpoint": "multilabel_uci/best_model.pth",
+  "in_channels": 8,
+  "epochs": 50,
+  "lr": 0.0002,
+  "weight_decay": 0.001,
+  "threshold": 0.3,
+  "use_amp": true,
+  "output_dir": "multilabel_uci_student_replicated",
+  "batch_size": 32,
+  "accum_steps": 1,
+  "task_type": "classification",
+  "max_length": 600,
+  "patch_size": 4,
+  "alpha_kd": 0.2,
+  "student_arch": "physiowavenpu"
+}

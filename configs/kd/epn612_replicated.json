@@ -1,0 +1,21 @@
+{
+  "train_file": "./EPN612_processed/epn612_train_set.h5",
+  "val_file": "./EPN612_processed/epn612_val_set.h5",
+  "test_file": "./EPN612_processed/epn612_test_set.h5",
+  "teacher_checkpoint": "multilabel_epn612/best_model.pth",
+  "in_channels": 8,
+  "epochs": 50,
+  "lr": 0.001,
+  "weight_decay": 0.001,
+  "threshold": 0.3,
+  "use_amp": true,
+  "max_length": 1024,
+  "patch_size": 8,
+  "output_dir": "multilabel_epn612_student_replicated",
+  "batch_size": 32,
+  "accum_steps": 1,
+  "task_type": "classification",
+  "alpha_kd": 0.2,
+  "num_workers": 1,
+  "student_arch": "physiowavenpu"
+}

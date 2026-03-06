@@ -10,6 +10,12 @@ All KD runs now use one script:
 python -m torch.distributed.run --nproc_per_node=1 --master_port=<PORT> run_kd.py <ARGS>
 ```
 
+You can also pass a config file:
+
+```bash
+python -m torch.distributed.run --nproc_per_node=1 --master_port=<PORT> run_kd.py --config configs/kd/<experiment>.json
+```
+
 This single entrypoint supports:
 - single-label and multi-label tasks (`--task_type classification|multilabel`)
 - all student backbones (`--student_arch ...`)
@@ -27,8 +33,10 @@ Legacy KD scripts were removed.
 - `kd/schedulers.py`: LR schedulers
 - `kd/teacher.py`: teacher model loading/building helpers
 - `dataset_multilabel.py`: core HDF5 dataset classes/collate
+- `configs/kd/`: versioned experiment configs for reproducible runs
 - `data_prep/`: all dataset preprocessing scripts (EMG + ECG)
 - `data_prep/README.md`: preprocessing quick-reference
+- `scripts/make_smoke_assets.py`: tiny synthetic dataset + teacher checkpoint generator for smoke tests
 
 ## Environment
 
@@ -146,6 +154,27 @@ These experiments use pre-existing split H5 files (no converter script included 
 
 ## Experiment Commands (Converted to Single Entrypoint)
 
+These original runs are captured as config files in `configs/kd/`:
+- `uci_emg_replicated.json`
+- `epn612_replicated.json`
+- `ptbxl_replicated.json`
+- `cpsc_replicated.json`
+- `chapman_replicated.json`
+- `chapman_ablation_kset7.json`
+- `db5_replicated.json`
+
+Run any config:
+
+```bash
+python -m torch.distributed.run --nproc_per_node=1 --master_port=29791 run_kd.py --config configs/kd/uci_emg_replicated.json
+```
+
+Override any config value from CLI (CLI wins):
+
+```bash
+python -m torch.distributed.run --nproc_per_node=1 --master_port=29791 run_kd.py --config configs/kd/uci_emg_replicated.json --epochs 5 --output_dir quick_test
+```
+
 ### UCI EMG
 
 ```bash
@@ -187,6 +216,26 @@ python -m torch.distributed.run --nproc_per_node=1 --master_port=29511 run_kd.py
 ```bash
 python -m torch.distributed.run --nproc_per_node=1 --master_port=28881 run_kd.py --train_file test1_db5/db5_train_set.h5 --val_file test1_db5/db5_val_set.h5 --test_file test1_db5/db5_test_set.h5 --teacher_checkpoint multilabel_db5_student_physiowave_new_tiny_1/best_student.pth --task_type classification --student_arch physiowavenpu --alpha_kd 0.2 --in_channels 8 --max_length 512 --patch_size 8 --batch_size 32 --accum_steps 1 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --num_workers 1 --output_dir multilabel_db5_student_kd --scheduler cosine --teacher_logits_h5 test1_db5/db5_train_teacher_logits.h5 --sanity_teacher_test --teacher_arch physiowave
 ```
+
+## Smoke Test
+
+Use this to verify end-to-end training/eval wiring with tiny synthetic data.
+
+Generate tiny smoke assets:
+
+```bash
+python scripts/make_smoke_assets.py --out_dir smoke_assets
+```
+
+Run one-epoch smoke KD:
+
+```bash
+python -m torch.distributed.run --nproc_per_node=1 --master_port=29999 run_kd.py --config configs/kd/smoke_classification.json
+```
+
+Expected output:
+- `smoke_run_output/best_student.pth`
+- `smoke_run_output/test_results_kd.json`
 
 ## Outputs
 

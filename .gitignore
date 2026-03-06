@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS
+.DS_Store
+
+# Artifacts / checkpoints
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Dataset artifacts
+*.h5
+*.hdf5
+
+# Logs and outputs
+outputs/
+kd_output/
+wandb/
+
+# Local envs
+.venv/
+venv/
+.env

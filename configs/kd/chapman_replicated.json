@@ -1,0 +1,21 @@
+{
+  "train_file": "./data/ChapmanShaoxing/train.h5",
+  "val_file": "./data/ChapmanShaoxing/val.h5",
+  "test_file": "./data/ChapmanShaoxing/test.h5",
+  "teacher_checkpoint": "multilabel_chapman/best_model.pth",
+  "in_channels": 12,
+  "epochs": 50,
+  "lr": 0.001,
+  "weight_decay": 0.001,
+  "threshold": 0.3,
+  "use_amp": true,
+  "max_length": 2048,
+  "patch_size": 16,
+  "output_dir": "multilabel_chapman_student_replicated",
+  "batch_size": 32,
+  "accum_steps": 1,
+  "alpha_kd": 0.2,
+  "num_workers": 1,
+  "student_arch": "physiowavenpu",
+  "task_type": "classification"
+}

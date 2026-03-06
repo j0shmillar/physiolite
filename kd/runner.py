@@ -2531,12 +2531,45 @@ def main_worker(rank, world_size, args):
 # ----------------------------
 # Argparse
 # ----------------------------
-def main():
+def _load_config_defaults(config_path: str) -> dict:
+    with open(config_path, "r", encoding="utf-8") as f:
+        if config_path.endswith(".json"):
+            cfg = json.load(f)
+        elif config_path.endswith((".yml", ".yaml")):
+            try:
+                import yaml  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(
+                    "YAML config requested but PyYAML is not installed. "
+                    "Install pyyaml or use JSON config files."
+                ) from exc
+            cfg = yaml.safe_load(f)
+        else:
+            raise ValueError("Unsupported --config format. Use .json, .yml, or .yaml")
+
+    if cfg is None:
+        return {}
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config must be a mapping/object, got {type(cfg)}")
+    return cfg
+
+
+def main(argv=None):
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=str, default="")
+    pre_args, _ = pre.parse_known_args(argv)
+
     p = argparse.ArgumentParser(description="KD: Teacher -> Multi-backbone Student")
+    p.add_argument(
+        "--config",
+        type=str,
+        default="",
+        help="Path to JSON/YAML config file. Values are used as defaults; explicit CLI flags override them.",
+    )
 
     # Data
-    p.add_argument("--train_file", type=str, required=True)
-    p.add_argument("--val_file",   type=str, required=True)
+    p.add_argument("--train_file", type=str, default="")
+    p.add_argument("--val_file",   type=str, default="")
     p.add_argument("--test_file",  type=str, default="")
     p.add_argument("--data_key",   type=str, default="data")
     p.add_argument("--label_key",  type=str, default="label")
@@ -2562,7 +2595,7 @@ def main():
     p.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "none"])
 
     # Teacher
-    p.add_argument("--teacher_checkpoint", type=str, required=True)
+    p.add_argument("--teacher_checkpoint", type=str, default="")
 
     # KD
     p.add_argument("--alpha_kd", type=float, default=0.5)
@@ -2697,9 +2730,26 @@ def main():
                 choices=["bertwavelet", "physiowave"],
                 help="How to load --teacher_checkpoint for the sanity test.")
     
-    args = p.parse_args()
+    if pre_args.config:
+        config_defaults = _load_config_defaults(pre_args.config)
+        valid_keys = {a.dest for a in p._actions}
+        unknown_keys = sorted(k for k in config_defaults.keys() if k not in valid_keys)
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown keys in config '{pre_args.config}': {unknown_keys}. "
+                "Use 'python run_kd.py --help' for valid argument names."
+            )
+        p.set_defaults(**config_defaults)
+
+    args = p.parse_args(argv)
     if args.use_amp:
         args.amp = True
+    if not args.train_file:
+        p.error("--train_file is required (either CLI or via --config).")
+    if not args.val_file:
+        p.error("--val_file is required (either CLI or via --config).")
+    if not args.teacher_checkpoint:
+        p.error("--teacher_checkpoint is required (either CLI or via --config).")
 
     set_random_seed(args.seed)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))

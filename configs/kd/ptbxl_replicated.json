@@ -1,0 +1,20 @@
+{
+  "train_file": "physionet.org/files/ptb-xl/1.0.3/train.h5",
+  "val_file": "physionet.org/files/ptb-xl/1.0.3/val.h5",
+  "test_file": "physionet.org/files/ptb-xl/1.0.3/test.h5",
+  "teacher_checkpoint": "multilabel_ptb/best_model.pth",
+  "in_channels": 12,
+  "epochs": 50,
+  "lr": 0.001,
+  "weight_decay": 0.001,
+  "threshold": 0.3,
+  "use_amp": true,
+  "max_length": 2048,
+  "patch_size": 16,
+  "output_dir": "multilabel_ptb_student_replicated",
+  "batch_size": 32,
+  "accum_steps": 1,
+  "task_type": "classification",
+  "alpha_kd": 0.2,
+  "student_arch": "physiowavenpu"
+}
