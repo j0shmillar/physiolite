@@ -217,6 +217,7 @@ class PhysioWaveNPU(nn.Module):
         head_residual: bool = False,
         front_pool_k: int = 4,
         post_patch_pool_t=None,
+        legacy_bank_front_pool_bug: bool = False,
     ):
         super().__init__()
         del head_residual  # retained for API compatibility
@@ -236,13 +237,23 @@ class PhysioWaveNPU(nn.Module):
             raise AssertionError(
                 "patch_t > 16 is not supported on MAX78000. Choose patch_t in [1..16] and, if needed, set post_patch_pool_t to further downsample."
             )
-
-        self.bank = LearnableWaveletBank(
-            in_channels,
-            bank_ch=bank_ch,
-            kernel_set=kernel_set,
-            front_pool_k=front_pool_k,
-        )
+        
+        legacy_bank_front_pool_bug = True
+        if legacy_bank_front_pool_bug:
+            # Reproduce historical behavior from older scripts where front_pool_k
+            # was not forwarded into LearnableWaveletBank (bank defaulted to 3).
+            self.bank = LearnableWaveletBank(
+                in_channels,
+                bank_ch=bank_ch,
+                kernel_set=kernel_set,
+            )
+        else:
+            self.bank = LearnableWaveletBank(
+                in_channels,
+                bank_ch=bank_ch,
+                kernel_set=kernel_set,
+                front_pool_k=front_pool_k,
+            )
         self.patch = PatchEmbed1D_FusedPool(
             in_ch=self.bank.F,
             embed_dim=embed_dim,
@@ -303,7 +314,9 @@ def ai85_vitpw(**kw):
         head_residual=kw.get("head_residual", False),
         front_pool_k=kw.get("front_pool_k", 4),
         post_patch_pool_t=kw.get("post_patch_pool_t", 5),
+        legacy_bank_front_pool_bug=kw.get("legacy_bank_front_pool_bug", False),
     )
 
 
 models = [{"name": "ai85_vitpw", "min_input": 1, "dim": 1}]
+

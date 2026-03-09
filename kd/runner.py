@@ -235,7 +235,8 @@ STUDENT_DATASET_PROFILES = {
     "epn612": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
     "ptb": {"patch_t": 8, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
     "cpsc": {"patch_t": 8, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
-    "chapman": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 8, "student_pos_freqs": 8},
+    #"chapman": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 8, "student_pos_freqs": 8},
+    "chapman": {"patch_t": 16, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
 }
 
 
@@ -543,7 +544,13 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
                 )
                 logits = model(x_in, pos_embed_y)
             elif student_arch == "physiowave":
-                logits = model(x_in, task='downstream', task_name='classification')
+                pw_task = "multilabel" if task_type == "multilabel" else "classification"
+                logits = model(
+                    x_in,
+                    task="downstream",
+                    task_name=pw_task,
+                    return_logits=(pw_task == "multilabel"),
+                )
                 if isinstance(logits, (tuple, list)): logits = logits[0]
                 assert logits.dim() == 2, f"PhysioWave should output [B,C], got {tuple(logits.shape)}"
             else:
@@ -1474,8 +1481,46 @@ def build_teacher_model(args, train_ds, device, rank, kd_outputs):
     teacher_pe_cache = None
 
     if args.teacher_model == "physiowave":
-        teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, kd_outputs, rank=rank)
-        teacher = teacher.to(device)
+        teacher_profile = args.teacher_dataset_profile
+        if teacher_profile == "none" and args.student_dataset_profile != "none":
+            teacher_profile = args.student_dataset_profile
+        if teacher_profile in ("none", "auto"):
+            teacher_profile = infer_student_dataset_profile(args.train_file)
+        if rank == 0:
+            print(f">> Resolved teacher profile: {teacher_profile}")
+
+        if teacher_profile == "db5":
+            # DB5 PhysioWave checkpoints in this repo use the DB5-specific architecture
+            # (e.g. patch_size=64 and multi-wavelet selector). Build that exact config first.
+            teacher, _ = load_physiowave()
+            ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
+            sd = _extract_checkpoint_state_dict(ckpt)
+            if isinstance(sd, dict) and any(k.startswith("module.") for k in sd.keys()):
+                sd = {k[7:] if k.startswith("module.") else k: v for k, v in sd.items()}
+
+            model_sd = teacher.state_dict()
+            shape_mismatch = []
+            filtered_sd = {}
+            for k, v in sd.items():
+                if k not in model_sd:
+                    continue
+                if tuple(v.shape) != tuple(model_sd[k].shape):
+                    shape_mismatch.append((k, tuple(model_sd[k].shape), tuple(v.shape)))
+                    continue
+                filtered_sd[k] = v
+
+            msg = teacher.load_state_dict(filtered_sd, strict=False)
+            teacher = teacher.to(device)
+            if rank == 0:
+                print(">> Loaded DB5 PhysioWave teacher checkpoint with DB5 config.")
+                print(
+                    f"   matched={len(filtered_sd)} "
+                    f"missing={len(msg.missing_keys)} unexpected={len(msg.unexpected_keys)} "
+                    f"shape_mismatch={len(shape_mismatch)}"
+                )
+        else:
+            teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, kd_outputs, rank=rank)
+            teacher = teacher.to(device)
         patch_wavelet_modules_io(teacher, rank=rank)
     else:
         t_args = deepcopy(args)
@@ -2338,31 +2383,8 @@ def main_worker(rank, world_size, args):
     if use_ddp:
         student = DDP(student, device_ids=[rank], find_unused_parameters=find_unused)
 
-    def compute_class_counts_from_loader(train_loader, num_classes, device="cpu", use_cached_teacher=False):
-        counts = torch.zeros(num_classes, dtype=torch.long, device=device)
-        print("Computing clas counts")
-        for batch in tqdm(train_loader):
-            # adjust these two lines to match your batch structure
-            if use_cached_teacher:
-                x, y, _ = batch  # y: [B]
-            else:
-                x, y = batch
-            y = y.to(device)
-            counts += torch.bincount(y, minlength=num_classes)
-        return counts
-
-    # example usage
-    #num_classes = train_ds.num_classes
-    #counts = compute_class_counts_from_loader(train_loader, num_classes, device="cpu", use_cached_teacher = use_cached_teacher)
-    #print(f"Counts = {counts}")
-
-    # inverse-frequency weights (normalized)
-    #weights = 1.0 / (counts.float().clamp_min(1.0) ** 0.5)
-    #weights = weights / weights.mean()
-    
     # Loss
     hard_criterion = nn.CrossEntropyLoss() if args.task_type == "classification" else nn.BCEWithLogitsLoss()
-    #hard_criterion = nn.CrossEntropyLoss(weight=weights.to(device), label_smoothing=0.0)
     #weights = None  # or your computed weights tensor on device
     #hard_criterion = CEPlusSoftF1Macro(
     #    num_classes=num_classes,
@@ -2370,7 +2392,6 @@ def main_worker(rank, world_size, args):
     #    weight=(weights.to(device) if weights is not None else None),
     #    ignore_index=getattr(args, "ignore_index", -100),
     #).to(device)
-    # hard_criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     # Optim + scheduler
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, student.parameters()),
@@ -2443,7 +2464,7 @@ def main_worker(rank, world_size, args):
             student_arch=args.teacher_model,
             pe_scale=args.teacher_pe_scale,
             waveformer_patch_width=args.waveformer_patch_width,
-            amp_enabled=False,
+            amp_enabled=amp_enabled,
             amp_dtype=(torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16),
         )
 
@@ -2513,7 +2534,13 @@ def main_worker(rank, world_size, args):
                         )
                         s_logits = student(x_in, pos_embed_y)
                     elif args.student_arch == "physiowave":
-                        s_logits = student(x_in, task='downstream', task_name='classification')
+                        pw_task = "multilabel" if args.task_type == "multilabel" else "classification"
+                        s_logits = student(
+                            x_in,
+                            task="downstream",
+                            task_name=pw_task,
+                            return_logits=(pw_task == "multilabel"),
+                        )
                         if isinstance(s_logits, (tuple, list)): s_logits = s_logits[0]
                         assert s_logits.dim() == 2, f"PhysioWave should output [B,C], got {tuple(s_logits.shape)}"
                     else:
@@ -2589,7 +2616,7 @@ def main_worker(rank, world_size, args):
             task_type=args.task_type, pe_cache=pe_cache,
             student_arch=args.student_arch, pe_scale=args.student_pe_scale,
             waveformer_patch_width=args.waveformer_patch_width,
-            amp_enabled=False, amp_dtype=amp_dtype,
+            amp_enabled=amp_enabled, amp_dtype=amp_dtype,
         )
         val_loss = val_metrics["loss"]
         val_f1_macro = val_metrics["f1_macro"]
@@ -2624,7 +2651,7 @@ def main_worker(rank, world_size, args):
             task_type=args.task_type, pe_cache=pe_cache,
             student_arch=args.student_arch, pe_scale=args.student_pe_scale,
             waveformer_patch_width=args.waveformer_patch_width,
-            amp_enabled=False, amp_dtype=amp_dtype
+            amp_enabled=amp_enabled, amp_dtype=amp_dtype
         )
         with open(os.path.join(args.output_dir, "test_results_kd.json"), "w") as f:
             json.dump(test_metrics, f, indent=4)
@@ -2755,9 +2782,9 @@ def main(argv=None):
     p.add_argument(
         "--teacher_dataset_profile",
         type=str,
-        default="none",
+        default="auto",
         choices=["none", "auto", "uci", "db5", "epn612", "ptb", "cpsc", "chapman"],
-        help="Optional dataset profile override for teacher_model=physiowavenpu.",
+        help="Optional dataset profile override for teacher model shape selection (used for physiowave DB5 path).",
     )
     p.add_argument("--teacher_pe_scale", type=float, default=0.1)
 
@@ -2889,3 +2916,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

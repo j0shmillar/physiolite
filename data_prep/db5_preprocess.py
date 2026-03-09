@@ -373,15 +373,19 @@ def main():
 
     for subj in subjects:
         subj_path = os.path.join(args.input_data, subj)
-        mat_files = [f for f in sorted(os.listdir(subj_path)) if f.endswith(".mat")]
+        mat_files = []
+        for root, _dirs, files in os.walk(subj_path):
+            for f in sorted(files):
+                if f.endswith(".mat"):
+                    mat_files.append(os.path.join(root, f))
         if not mat_files:
             print(f"  [{subj}] no .mat files; skip")
             continue
 
         files_data = []
         print(f"Subject {subj}: {len(mat_files)} files")
-        for mf in mat_files:
-            mpath = os.path.join(subj_path, mf)
+        for mpath in mat_files:
+            mf = os.path.relpath(mpath, subj_path)
             try:
                 emg, lab, rep = parse_db5_file(mpath)
                 emg = select_n_channels(emg, args.channel_mode, args.channels)
@@ -544,3 +548,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
