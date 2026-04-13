@@ -188,17 +188,10 @@ python -m torch.distributed.run --nproc_per_node=1 --master_port=29593 run_kd.py
 
 ### CHAPMAN
 
-TODO from the original note: change the dataset path to `datasets/ChapmanShaoxing`.
+TODO: change path to `datasets/ChapmanShaoxing`.
 
 ```bash
 python -m torch.distributed.run --nproc_per_node=1 --master_port=29511 run_kd.py --train_file ./data/ChapmanShaoxing/train.h5 --val_file ./data/ChapmanShaoxing/val.h5 --test_file ./data/ChapmanShaoxing/test.h5 --teacher_checkpoint pwave/chapman.pth --in_channels 12 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --use_amp --max_length 2048 --patch_size 16 --output_dir multilabel_chapman_student_replicated --batch_size 32 --accum_steps 1 --alpha_kd 0.20 --num_workers 1 --student_arch physiowavenpu --student_dataset_profile chapman --teacher_logits_h5 pwave/chapman_logits.h5 --sanity_teacher_test --task_type multilabel
-```
-
-## Smoke Test
-
-```bash
-python scripts/make_smoke_assets.py --out_dir smoke_assets
-python -m torch.distributed.run --nproc_per_node=1 --master_port=29999 run_kd.py --config configs/kd/smoke_classification.json
 ```
 
 ## Help
