@@ -5,9 +5,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as _ckpt
 
-from wavelet_modules import SoftGateWaveletDecomp
-from transformer_modules import PatchEmbed, PositionEmbedding, TransformerEncoder
-from head_modules import ClassificationHead, ReconstructionHead, RegressionHead, LinearHead, MultiLabelClassificationHead
+from .wavelet_modules import SoftGateWaveletDecomp
+from .transformer_modules import PatchEmbed, PositionEmbedding, TransformerEncoder
+from .head_modules import (
+    ClassificationHead,
+    ReconstructionHead,
+    RegressionHead,
+    LinearHead,
+    MultiLabelClassificationHead,
+)
 
 
 class BERTWaveletTransformer(nn.Module):
