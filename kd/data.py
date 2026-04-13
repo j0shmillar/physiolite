@@ -6,7 +6,7 @@ import torch
 from scipy.signal import iirnotch, butter, filtfilt, medfilt
 from torch.utils.data import WeightedRandomSampler
 
-from dataset_multilabel import collate_multilabel_fn, collate_singlelabel_fn
+from timeseries_ds import collate_multilabel_fn, collate_singlelabel_fn
 
 
 def collate_singlelabel_with_tlogits(batch):

@@ -32,7 +32,7 @@ from sklearn.metrics import (
 
 from models.physiowave import BERTWaveletTransformer
 from models.vit_pw import PhysioWaveNPU
-from dataset_multilabel import (
+from timeseries_ds import (
     SingleLabelTimeSeriesDataset,
     MultiLabelTimeSeriesDataset,
     collate_multilabel_fn,
