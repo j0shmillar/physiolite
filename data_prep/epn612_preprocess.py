@@ -1,209 +1,188 @@
+#!/usr/bin/env python3
+
+import argparse
 import glob
 import json
 import os
-import argparse
+
 import h5py
 import numpy as np
+from scipy.signal import butter, filtfilt, iirnotch, sosfiltfilt
 from tqdm.auto import tqdm
 
-# Dataset parameters
-fs, n_ch = 200.0, 8  # Sampling frequency and number of EMG channels
 
-# Gesture mapping dictionary
-gesture_map = {
+FS = 200.0
+N_CH = 8
+GESTURE_MAP = {
     "noGesture": 0,
     "waveIn": 1,
     "waveOut": 2,
     "pinch": 3,
     "open": 4,
     "fist": 5,
-    "notProvided": 6,  # Invalid gesture
+    "notProvided": 6,
 }
+INVALID_LABEL = GESTURE_MAP["notProvided"]
+EPS = 1e-8
+STD_FLOOR = 1e-3
+CLIP_VALUE = 10.0
 
-def normalize_signal(signal: np.ndarray) -> np.ndarray:
-    """
-    Normalize the signal by its maximum absolute value per channel.
-    
-    Args:
-        signal: Input signal array of shape (channels, samples)
-    
-    Returns:
-        Normalized signal with same shape
-    """
-    max_abs_value = np.max(np.abs(signal), axis=1, keepdims=True)
-    max_abs_value[max_abs_value == 0] = 1  # Avoid division by zero
-    return signal / max_abs_value
 
-def adjust_length(x: np.ndarray, max_len: int) -> np.ndarray:
-    """
-    Adjust signal to fixed length by truncation or zero-padding.
-    
-    Args:
-        x: Input signal array of shape (channels, samples)
-        max_len: Target sequence length
-    
-    Returns:
-        Adjusted signal of shape (channels, max_len)
-    """
-    n_ch, seq_len = x.shape
-    if seq_len >= max_len:
-        return x[:, :max_len]
-    padding = np.zeros((n_ch, max_len - seq_len), dtype=x.dtype)
-    return np.concatenate((x, padding), axis=1)
+def normalize_maxabs(signal: np.ndarray) -> np.ndarray:
+    scale = np.max(np.abs(signal), axis=1, keepdims=True)
+    scale[scale == 0] = 1.0
+    return (signal / scale).astype(np.float32)
 
-def extract_emg_signal(data_struct: dict, seq_len: int) -> tuple[np.ndarray, int]:
-    """
-    Extract EMG signal and label from the data structure.
-    
-    Args:
-        data_struct: Dictionary containing EMG data and gesture information
-        seq_len: Target sequence length
-    
-    Returns:
-        Tuple of (processed EMG signal, gesture label)
-    """
-    # Stack EMG channels and scale values
-    emg = np.stack([emg_i for emg_i in data_struct["emg"].values()], dtype=np.float32) / 128
-    # Adjust to target length
-    emg = adjust_length(emg, seq_len)
-    # Apply normalization
-    emg = normalize_signal(emg)
-    # Get gesture label
-    label = gesture_map.get(data_struct.get("gestureName", "notProvided"), 6)
-    return emg, label
 
-def save_h5_file(file_path, emg_data, labels):
-    """
-    Save data to HDF5 file.
-    
-    Args:
-        file_path: Output file path
-        emg_data: List of EMG arrays
-        labels: List of corresponding labels
-    """
-    with h5py.File(file_path, "w") as h5f:
-        h5f.create_dataset("data", data=np.array(emg_data, dtype=np.float32))
-        h5f.create_dataset("label", data=np.array(labels, dtype=np.int64))
+def adjust_length(signal: np.ndarray, seq_len: int) -> np.ndarray:
+    if signal.shape[1] >= seq_len:
+        return signal[:, :seq_len]
+    pad = np.zeros((signal.shape[0], seq_len - signal.shape[1]), dtype=signal.dtype)
+    return np.concatenate((signal, pad), axis=1)
 
-def process_training_json(source_folder, seq_len, train_data, train_labels, val_data, val_labels):
-    """
-    Process training JSON files.
-    
-    Args:
-        source_folder: Path to training JSON folder
-        seq_len: Target sequence length
-        train_data: List to store training samples
-        train_labels: List to store training labels
-        val_data: List to store validation samples
-        val_labels: List to store validation labels
-    """
-    user_file_paths = glob.glob(os.path.join(source_folder, "user*", "user*.json"))
-    
-    for file_path in tqdm(user_file_paths, desc="Processing Training JSON Data", leave=False):
+
+def make_windows(signal: np.ndarray, seq_len: int, step_size: int) -> list[np.ndarray]:
+    signal = adjust_length(signal, seq_len)
+    if signal.shape[1] == seq_len:
+        return [signal]
+    windows = []
+    for start in range(0, signal.shape[1] - seq_len + 1, step_size):
+        windows.append(signal[:, start:start + seq_len])
+    if not windows or (signal.shape[1] - seq_len) % step_size != 0:
+        windows.append(signal[:, -seq_len:])
+    return windows
+
+
+def bandpass_sos(fs: float, low: float, high: float, order: int):
+    nyq = 0.5 * fs
+    low = max(low, 0.01 * nyq)
+    high = min(high, 0.95 * nyq)
+    if high <= low:
+        raise ValueError(f"Invalid bandpass settings: low={low}, high={high}, fs={fs}")
+    return butter(order, [low, high], btype="bandpass", fs=fs, output="sos")
+
+
+def filter_emg(signal: np.ndarray, fs: float, band_low: float, band_high: float, band_order: int,
+               notch_freq: float, notch_q: float) -> np.ndarray:
+    x = np.nan_to_num(signal.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    y = sosfiltfilt(bandpass_sos(fs, band_low, band_high, band_order), x, axis=1)
+    if 0 < notch_freq < 0.5 * fs:
+        b, a = iirnotch(notch_freq, notch_q, fs)
+        y = filtfilt(b, a, y, axis=1)
+    return np.nan_to_num(y.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def normalize_filtered(signal: np.ndarray) -> np.ndarray:
+    mean = signal.mean(axis=1, keepdims=True)
+    std = np.maximum(signal.std(axis=1, keepdims=True), STD_FLOOR)
+    out = (signal - mean) / (std + EPS)
+    return np.clip(out, -CLIP_VALUE, CLIP_VALUE).astype(np.float32)
+
+
+def extract_emg_signal(sample: dict, seq_len: int, args) -> tuple[list[np.ndarray], int]:
+    emg = np.stack([sample["emg"][key] for key in sorted(sample["emg"].keys())], dtype=np.float32) / 128.0
+    windows = make_windows(emg, seq_len, args.step_size)
+    processed = []
+    for emg in windows:
+        if args.enable_filtering:
+            emg = filter_emg(
+                emg,
+                fs=args.fs,
+                band_low=args.band_low,
+                band_high=args.band_high,
+                band_order=args.band_order,
+                notch_freq=args.notch_freq,
+                notch_q=args.notch_q,
+            )
+        if args.normalization == "zscore":
+            processed.append(normalize_filtered(emg))
+        else:
+            processed.append(normalize_maxabs(emg))
+    label = GESTURE_MAP.get(sample.get("gestureName", "notProvided"), INVALID_LABEL)
+    return processed, label
+
+
+def save_h5(path: str, data: list[np.ndarray], labels: list[int]):
+    with h5py.File(path, "w") as h5f:
+        h5f.create_dataset("data", data=np.asarray(data, dtype=np.float32))
+        h5f.create_dataset("label", data=np.asarray(labels, dtype=np.int64))
+
+
+def process_training_json(source_dir: str, seq_len: int, args, train_data, train_labels, val_data, val_labels):
+    for file_path in tqdm(glob.glob(os.path.join(source_dir, "user*", "user*.json")),
+                          desc="Training JSON", leave=False):
         with open(file_path, "r", encoding="utf-8") as f:
             user_data = json.load(f)
 
-        # Process training samples
         for sample in user_data.get("trainingSamples", {}).values():
-            emg, label = extract_emg_signal(sample, seq_len)
-            if label == 6:  # Skip invalid gestures
-                continue
-            train_data.append(emg)
-            train_labels.append(label)
+            emg_list, label = extract_emg_signal(sample, seq_len, args)
+            if label != INVALID_LABEL:
+                train_data.extend(emg_list)
+                train_labels.extend([label] * len(emg_list))
 
-        # Process testing samples as validation data
-        testing_samples = list(user_data.get("testingSamples", {}).values())
-        for sample in testing_samples:
-            emg, label = extract_emg_signal(sample, seq_len)
-            if label == 6:  # Skip invalid gestures
-                continue
-            val_data.append(emg)
-            val_labels.append(label)
+        for sample in user_data.get("testingSamples", {}).values():
+            emg_list, label = extract_emg_signal(sample, seq_len, args)
+            if label != INVALID_LABEL:
+                val_data.extend(emg_list)
+                val_labels.extend([label] * len(emg_list))
 
-def process_testing_json(source_folder, seq_len, train_data, train_labels, test_data, test_labels):
-    """
-    Process testing JSON files.
-    
-    Args:
-        source_folder: Path to testing JSON folder
-        seq_len: Target sequence length
-        train_data: List to store additional training samples
-        train_labels: List to store additional training labels
-        test_data: List to store test samples
-        test_labels: List to store test labels
-    """
-    user_file_paths = glob.glob(os.path.join(source_folder, "user*", "user*.json"))
-    
-    for file_path in tqdm(user_file_paths, desc="Processing Testing JSON Data", leave=False):
+
+def process_testing_json(source_dir: str, seq_len: int, args, train_data, train_labels, test_data, test_labels):
+    for file_path in tqdm(glob.glob(os.path.join(source_dir, "user*", "user*.json")),
+                          desc="Testing JSON", leave=False):
         with open(file_path, "r", encoding="utf-8") as f:
             user_data = json.load(f)
 
-        # Organize samples by gesture type
-        gesture_map_data = {gesture: [] for gesture in gesture_map.keys()}
-
+        grouped = {name: [] for name in GESTURE_MAP}
         for sample in user_data.get("trainingSamples", {}).values():
-            gesture_name = sample.get("gestureName", "notProvided")
-            if gesture_name in gesture_map_data:
-                gesture_map_data[gesture_name].append(sample)
+            grouped[sample.get("gestureName", "notProvided")].append(sample)
 
-        # Split samples: first 10 for training, rest for testing
-        for gesture, samples in gesture_map_data.items():
-            for i, sample in enumerate(samples):
-                emg, label = extract_emg_signal(sample, seq_len)
-                if label == 6:  # Skip invalid gestures
+        for samples in grouped.values():
+            for idx, sample in enumerate(samples):
+                emg_list, label = extract_emg_signal(sample, seq_len, args)
+                if label == INVALID_LABEL:
                     continue
-                if i < 10:
-                    train_data.append(emg)
-                    train_labels.append(label)
+                if idx < 10:
+                    train_data.extend(emg_list)
+                    train_labels.extend([label] * len(emg_list))
                 else:
-                    test_data.append(emg)
-                    test_labels.append(label)
+                    test_data.extend(emg_list)
+                    test_labels.extend([label] * len(emg_list))
+
 
 def main():
-    ap = argparse.ArgumentParser(description="Preprocess EPN612 JSON dataset into HDF5 splits.")
+    ap = argparse.ArgumentParser(description="Preprocess EPN612 JSON dataset into train/val/test HDF5 files.")
     ap.add_argument("--source_training", type=str, default="./EMG-EPN612 Dataset/trainingJSON")
     ap.add_argument("--source_testing", type=str, default="./EMG-EPN612 Dataset/testingJSON")
     ap.add_argument("--out_dir", type=str, default="./EPN612_processed")
     ap.add_argument("--seq_len", type=int, default=1024)
+    ap.add_argument("--step_size", type=int, default=512)
+    ap.add_argument("--normalization", type=str, default="maxabs", choices=["maxabs", "zscore"])
+    ap.add_argument("--enable_filtering", action="store_true")
+    ap.add_argument("--fs", type=float, default=FS)
+    ap.add_argument("--band_low", type=float, default=20.0)
+    ap.add_argument("--band_high", type=float, default=190.0)
+    ap.add_argument("--band_order", type=int, default=4)
+    ap.add_argument("--notch_freq", type=float, default=50.0)
+    ap.add_argument("--notch_q", type=float, default=30.0)
     args = ap.parse_args()
 
-    source_training = args.source_training
-    source_testing = args.source_testing
-    dest_folder = args.out_dir
-    seq_len = args.seq_len
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    # Create output directory
-    os.makedirs(dest_folder, exist_ok=True)
-
-    # Initialize data containers
     train_data, train_labels = [], []
     val_data, val_labels = [], []
     test_data, test_labels = [], []
 
-    # Print processing information
-    print("Processing EPN612 dataset with max-abs normalization")
-    print(f"Sampling rate: {fs} Hz")
-    print(f"Sequence length: {seq_len} samples")
-    print(f"Preprocessing: Max absolute value normalization")
-    print(f"Channels: {n_ch}")
-    
-    # Process data
-    process_training_json(source_training, seq_len, train_data, train_labels, val_data, val_labels)
-    process_testing_json(source_testing, seq_len, train_data, train_labels, test_data, test_labels)
+    process_training_json(args.source_training, args.seq_len, args, train_data, train_labels, val_data, val_labels)
+    process_testing_json(args.source_testing, args.seq_len, args, train_data, train_labels, test_data, test_labels)
 
-    # Print dataset statistics
-    print(f"\nSaving max-abs normalized datasets:")
-    print(f"Train samples: {len(train_data)}")
-    print(f"Validation samples: {len(val_data)}")
-    print(f"Test samples: {len(test_data)}")
+    save_h5(os.path.join(args.out_dir, "epn612_train_set.h5"), train_data, train_labels)
+    save_h5(os.path.join(args.out_dir, "epn612_val_set.h5"), val_data, val_labels)
+    save_h5(os.path.join(args.out_dir, "epn612_test_set.h5"), test_data, test_labels)
 
-    # Save to HDF5 files
-    save_h5_file(os.path.join(dest_folder, "epn612_train_set.h5"), train_data, train_labels)
-    save_h5_file(os.path.join(dest_folder, "epn612_val_set.h5"), val_data, val_labels)
-    save_h5_file(os.path.join(dest_folder, "epn612_test_set.h5"), test_data, test_labels)
+    mode = args.normalization
+    print(f"Saved EPN612 splits to {args.out_dir} using {mode} preprocessing.")
 
-    print("\nProcessing complete!")
-    print("Data preprocessed with max absolute value normalization")
 
 if __name__ == "__main__":
     main()

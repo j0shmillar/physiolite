@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-"""
-NinaPro DB5 data processor (leakage-safe, repetition-safe, numerically safe)
-
-End-to-end script that:
-- Selects N channels (default 8; first or last armband)
-- Optionally applies zero-phase bandpass + notch filtering on raw continuous sEMG
-- Prevents normalization leakage by computing per-subject per-channel μ/σ from TRAIN repetitions only
-- Windows strictly *within contiguous repetition runs* (no cross-repetition leakage/contamination)
-- Standardizes each channel via per-channel z-score normalization
-- Hardens normalization to avoid NaN/Inf (std clamp + clip + finite asserts)
-- Writes label_map.json (raw -> consecutive)
-
-Filtering behavior:
-  - Default: no filtering (unfiltered pipeline)
-  - If --enable_filtering: apply zero-phase bandpass + notch before normalization
-
-NOTE: if fs is too low for band_high (e.g. DB5 fs=200 -> Nyquist=100),
-      band_high is clamped to 0.95*Nyquist automatically.
-"""
+"""Preprocess NinaPro DB5 into train/val/test HDF5 files."""
 
 import os
 import json
@@ -31,12 +13,9 @@ from sklearn.model_selection import train_test_split
 
 from scipy.signal import butter, sosfiltfilt, iirnotch, filtfilt
 
-# ----------------------------
-# Defaults
-# ----------------------------
 FS_DEFAULT = 200
-WSIZE_DEFAULT = 50   # 250 ms @ 200 Hz
-STEP_DEFAULT  = 25   # 125 ms @ 200 Hz
+WSIZE_DEFAULT = 50
+STEP_DEFAULT  = 25
 
 TRAIN_REPEATS = [1, 3, 4, 6]
 VAL_REPEATS   = [2]
@@ -44,13 +23,8 @@ TEST_REPEATS  = [5]
 
 EPS = 1e-8
 
-# Numeric safety knobs
-STD_FLOOR = 1e-3     # clamp tiny stds
-CLIP_VALUE = 10.0    # clip normalized EMG to [-CLIP_VALUE, +CLIP_VALUE]
-
-# ----------------------------
-# IO helpers
-# ----------------------------
+STD_FLOOR = 1e-3
+CLIP_VALUE = 10.0
 def save_h5(path, X, y):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
@@ -72,13 +46,8 @@ def sanity_norm_print(name, X):
           f"std/ch mean={std_per_ch.mean():.3f} min={std_per_ch.min():.3f} max={std_per_ch.max():.3f} | "
           f"min={float(np.min(X)):.3f} max={float(np.max(X)):.3f}")
 
-# ----------------------------
-# Core helpers
-# ----------------------------
 def contiguous_runs(mask: np.ndarray):
-    """
-    Given boolean mask length T, yield (start, end) for True-runs, end exclusive.
-    """
+    """Yield contiguous True-runs as half-open intervals."""
     mask = mask.astype(bool)
     T = mask.shape[0]
     if T == 0:
@@ -96,13 +65,12 @@ def contiguous_runs(mask: np.ndarray):
 
 def bandpass_sos(fs: float, low: float, high: float, order: int):
     nyq = 0.5 * fs
-    # clamp to valid digital filter region
     low_c  = max(0.0, float(low))
     high_c = float(high)
     if high_c >= nyq:
         high_c = 0.95 * nyq
     if low_c <= 0.0:
-        low_c = 0.01 * nyq  # tiny >0 to avoid invalid
+        low_c = 0.01 * nyq
     if high_c <= low_c:
         raise ValueError(f"Invalid band: low={low} high={high} for fs={fs} (after clamp low={low_c}, high={high_c})")
 
@@ -119,25 +87,15 @@ def filter_emg_zero_phase(
     notch_freq: float,
     notch_q: float,
 ) -> np.ndarray:
-    """
-    emg_t_c: (T,C) float32/float64
-    Returns filtered emg (T,C) float32 with:
-      - zero-phase bandpass (sosfiltfilt)
-      - zero-phase notch (filtfilt)
-    """
+    """Apply zero-phase bandpass and notch filtering to EMG."""
     x = np.asarray(emg_t_c, dtype=np.float64)
-    # harden input
     x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
     sos, low_eff, high_eff, nyq = bandpass_sos(fs, band_low, band_high, band_order)
     if high_eff != band_high:
         print(f"  [warn] band_high clamped: requested={band_high} Hz, effective={high_eff:.3f} Hz (Nyquist={nyq:.1f} Hz)")
 
-    # bandpass (zero-phase)
     y = sosfiltfilt(sos, x, axis=0)
-
-    # notch (zero-phase)
-    # if notch_freq >= Nyquist, skip
     if notch_freq > 0 and notch_freq < nyq:
         b, a = iirnotch(w0=float(notch_freq), Q=float(notch_q), fs=float(fs))
         y = filtfilt(b, a, y, axis=0)
@@ -149,10 +107,7 @@ def filter_emg_zero_phase(
     return y
 
 def compute_mu_std_from_segments(segments):
-    """
-    segments: list of (T_i, C) arrays
-    returns mu(C,), std(C,) with std clamped to avoid divide-by-zero
-    """
+    """Compute per-channel normalization statistics."""
     if not segments:
         raise ValueError("No segments provided to compute normalization stats.")
 
@@ -165,7 +120,6 @@ def compute_mu_std_from_segments(segments):
         if seg.ndim != 2 or seg.shape[1] != C:
             raise ValueError(f"Bad segment shape for mu/std: {seg.shape}, expected (*,{C})")
         x = seg.astype(np.float64)
-        # Welford per-sample over time
         for i in range(x.shape[0]):
             n += 1
             delta = x[i] - mean
@@ -181,9 +135,7 @@ def compute_mu_std_from_segments(segments):
     return mu, std
 
 def zscore_apply_per_channel(emg_t_c: np.ndarray, mu: np.ndarray, std: np.ndarray) -> np.ndarray:
-    """
-    Per-channel z-score using provided μ/σ (C,). (Leakage-safe if μ/σ computed from TRAIN reps only.)
-    """
+    """Apply per-channel z-score normalization."""
     x = np.asarray(emg_t_c, dtype=np.float32)
     x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     x = (x - mu[None, :]) / (std[None, :] + EPS)
@@ -199,15 +151,7 @@ def segment_within_repetition_majority(
     min_majority: float = 0.9,
     drop_ambiguous: bool = False,
 ):
-    """
-    Segment within contiguous repetition runs only (no cross-repetition windows).
-    Label by majority vote within window.
-
-    Returns:
-      X: (N, C, W) float32
-      y: (N,) int64
-      r: (N,) int64
-    """
+    """Window within repetition runs and label by window majority."""
     T, C = emg_t_c.shape
     if T < wsize:
         return (np.empty((0, C, wsize), np.float32),
@@ -262,15 +206,8 @@ def cap_rest_indices(y, max_rest_ratio):
     keep[rest[:max_rest]] = True
     return keep
 
-# ----------------------------
-# DB5 parsing
-# ----------------------------
 def parse_db5_file(mpath: str):
-    """
-    Returns:
-      emg (T, 16), lab (T,), rep (T,)
-    Applies DB5 exercise label offsets for E2/E3.
-    """
+    """Load one DB5 recording and apply exercise label offsets."""
     d = loadmat(mpath)
     if "emg" not in d or "restimulus" not in d or "rerepetition" not in d:
         raise KeyError("missing one of: emg, restimulus, rerepetition")
@@ -286,7 +223,6 @@ def parse_db5_file(mpath: str):
         raise ValueError(f"length mismatch emg:{emg.shape} lab:{lab.shape} rep:{rep.shape}")
 
     fname = os.path.basename(mpath)
-    # DB exercise label offsets (zeros preserved)
     if "E2" in fname:
         lab = np.where(lab == 0, 0, lab + 12)
     elif "E3" in fname:
@@ -305,9 +241,6 @@ def select_n_channels(emg: np.ndarray, mode: str, channels: int) -> np.ndarray:
     else:
         raise ValueError(f"Unknown channel_mode: {mode}")
 
-# ----------------------------
-# Main
-# ----------------------------
 def main():
     ap = argparse.ArgumentParser(description="DB5 EMG formatter (rep-safe windowing + zero-phase filtering + leakage-safe per-channel zscore)")
     ap.add_argument("--input_data", type=str, default="data/ninapro_db5/",
@@ -336,11 +269,10 @@ def main():
     ap.add_argument("--channel_mode", type=str, default="first", choices=["first", "last"],
                     help="Select first N or last N channels (armband choice)")
 
-    # --- Optional filtering knobs ---
     ap.add_argument("--enable_filtering", action="store_true",
                     help="Apply bandpass + notch filtering before normalization.")
     ap.add_argument("--band_low", type=float, default=20.0, help="Bandpass low cutoff (Hz)")
-    ap.add_argument("--band_high", type=float, default=90.0, help="Bandpass high cutoff (Hz)")
+    ap.add_argument("--band_high", type=float, default=95.0, help="Bandpass high cutoff (Hz)")
     ap.add_argument("--band_order", type=int, default=4, help="Bandpass Butterworth order")
     ap.add_argument("--notch_freq", type=float, default=50.0, help="Notch frequency (Hz) - use 50 or 60")
     ap.add_argument("--notch_q", type=float, default=30.0, help="Notch quality factor Q")
@@ -367,7 +299,6 @@ def main():
     if args.split_type == "repetition":
         print("Repetition split: train {1,3,4,6}, val {2}, test {5}")
 
-    # Aggregate across all subjects (then split)
     X_all, y_all, r_all = [], [], []
     label_values_seen = set()
 
@@ -398,7 +329,6 @@ def main():
             print(f"  [{subj}] no usable files; skip")
             continue
 
-        # 1) Optional filter pass over continuous recordings
         files_proc = []
         for (mf, emg, lab, rep) in files_data:
             if args.enable_filtering:
@@ -417,7 +347,6 @@ def main():
                 raise ValueError(f"Non-finite values after preprocessing in {subj}/{mf}")
             files_proc.append((mf, emg_f, lab, rep))
 
-        # 2) Compute per-subject per-channel μ/σ using TRAIN repetitions only (leakage-safe)
         train_segments = []
         for (mf, emg_f, lab, rep) in files_proc:
             mask_train = np.isin(rep, TRAIN_REPEATS)
@@ -432,7 +361,6 @@ def main():
 
         mu, std = compute_mu_std_from_segments(train_segments)
 
-        # 3) Normalize + window within repetitions
         Xs_subj, ys_subj, rs_subj = [], [], []
         for (mf, emg_f, lab, rep) in files_proc:
             emg_n = zscore_apply_per_channel(emg_f, mu, std)
@@ -472,11 +400,10 @@ def main():
         print("No windows collected; abort.")
         return
 
-    X_all = np.concatenate(X_all, axis=0)  # (N, C, W)
-    y_all = np.concatenate(y_all, axis=0)  # (N,)
-    r_all = np.concatenate(r_all, axis=0)  # (N,)
+    X_all = np.concatenate(X_all, axis=0)
+    y_all = np.concatenate(y_all, axis=0)
+    r_all = np.concatenate(r_all, axis=0)
 
-    # Global remap labels to consecutive 0..K-1 (stable)
     uniq = sorted({int(v) for v in set(y_all.tolist())})
     old2new = {int(o): i for i, o in enumerate(uniq)}
     new2old = {i: int(o) for i, o in enumerate(uniq)}
@@ -488,9 +415,6 @@ def main():
     print(f"Raw labels: {uniq}")
     print(f"Remap: {old2new}")
 
-    # ----------------------------
-    # Build splits
-    # ----------------------------
     splits = {"train": {"X": None, "y": None},
               "val":   {"X": None, "y": None},
               "test":  {"X": None, "y": None}}
@@ -520,7 +444,6 @@ def main():
         splits["val"]["X"]   = X_all[idx_val];   splits["val"]["y"]   = y_all[idx_val]
         splits["test"]["X"]  = X_all[idx_test];  splits["test"]["y"]  = y_all[idx_test]
 
-    # Optionally cap rest ratio per split (post-window, safe)
     if args.max_rest_ratio >= 0:
         for s in ("train",):
             Xs, ys = splits[s]["X"], splits[s]["y"]
@@ -530,7 +453,6 @@ def main():
             splits[s]["X"] = Xs[keep]
             splits[s]["y"] = ys[keep]
 
-    # Save + diagnostics
     for s in ("train", "val", "test"):
         Xs, ys = splits[s]["X"], splits[s]["y"]
         if ys is None or ys.size == 0:
@@ -548,4 +470,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

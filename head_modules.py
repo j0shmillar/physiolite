@@ -1,8 +1,4 @@
-"""
-Task Head Modules
-Contains output layers for different tasks including classification head, 
-reconstruction head, linear head, multi-label classification head, etc.
-"""
+"""Task heads used by PhysioWave."""
 
 import torch
 import torch.nn as nn
@@ -10,16 +6,12 @@ import torch.nn.functional as F
 
 
 class ClassificationHead(nn.Module):
-    """
-    Classification Head
-    Supports different pooling strategies and multi-layer MLP
-    """
+    """Classification head with configurable pooling."""
     def __init__(self, embed_dim, num_classes, hidden_dims=None, dropout=0.1, 
                  pooling='mean', activation='gelu', use_norm=True):
         super().__init__()
         self.pooling = pooling
         
-        # Build MLP layers
         if hidden_dims is None:
             hidden_dims = [embed_dim]
         elif isinstance(hidden_dims, int):
@@ -28,11 +20,9 @@ class ClassificationHead(nn.Module):
         layers = []
         prev_dim = embed_dim
         
-        # Input layer normalization
         if use_norm:
             layers.append(nn.LayerNorm(prev_dim))
         
-        # Hidden layers
         for hidden_dim in hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
@@ -41,7 +31,6 @@ class ClassificationHead(nn.Module):
             ])
             prev_dim = hidden_dim
         
-        # Output layer
         layers.append(nn.Linear(prev_dim, num_classes))
         
         self.head = nn.Sequential(*layers)
@@ -65,10 +54,8 @@ class ClassificationHead(nn.Module):
         elif self.pooling == 'last':
             return x[:, -1]
         elif self.pooling == 'cls':
-            # Use first token as CLS token
             return x[:, 0]
         elif self.pooling == 'attention':
-            # Attention pooling (simplified version)
             attention_weights = torch.softmax(x.mean(dim=-1), dim=1)  # [B, N]
             return torch.sum(x * attention_weights.unsqueeze(-1), dim=1)  # [B, C]
         else:
@@ -84,19 +71,13 @@ class ClassificationHead(nn.Module):
         Returns:
             [B, num_classes] - Classification logits
         """
-        # Pooling
         pooled = self.pool_features(x)
         
-        # Classification
         return self.head(pooled)
 
 
 class MultiLabelClassificationHead(nn.Module):
-    """
-    Multi-Label Classification Head
-    Supports multi-label classification with sigmoid activation
-    Each label is independently predicted (not mutually exclusive)
-    """
+    """Multi-label classification head."""
     def __init__(self, embed_dim, num_labels, hidden_dims=None, dropout=0.1,
                  pooling='mean', activation='gelu', use_norm=True, 
                  label_smoothing=0.0, use_class_weights=False):
@@ -106,7 +87,6 @@ class MultiLabelClassificationHead(nn.Module):
         self.label_smoothing = label_smoothing
         self.use_class_weights = use_class_weights
         
-        # Build MLP layers
         if hidden_dims is None:
             hidden_dims = [embed_dim]
         elif isinstance(hidden_dims, int):
@@ -115,11 +95,9 @@ class MultiLabelClassificationHead(nn.Module):
         layers = []
         prev_dim = embed_dim
         
-        # Input layer normalization
         if use_norm:
             layers.append(nn.LayerNorm(prev_dim))
         
-        # Hidden layers
         for hidden_dim in hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
@@ -128,12 +106,10 @@ class MultiLabelClassificationHead(nn.Module):
             ])
             prev_dim = hidden_dim
         
-        # Output layer (no activation here, apply sigmoid separately)
         layers.append(nn.Linear(prev_dim, num_labels))
         
         self.head = nn.Sequential(*layers)
         
-        # Optional: per-class weights for imbalanced datasets
         if use_class_weights:
             self.class_weights = nn.Parameter(torch.ones(num_labels))
         else:
@@ -168,21 +144,16 @@ class MultiLabelClassificationHead(nn.Module):
         Returns:
             [B, num_labels] - Multi-label predictions (logits or probabilities)
         """
-        # Pooling
         pooled = self.pool_features(x)
         
-        # Get logits
         logits = self.head(pooled)
         
-        # Apply class weights if available
         if self.class_weights is not None:
             logits = logits * self.class_weights.unsqueeze(0)
         
-        # Return logits or probabilities
         if return_logits:
             return logits
         else:
-            # Apply sigmoid for independent probability per label
             return torch.sigmoid(logits)
     
     def compute_loss(self, logits, targets):
@@ -196,26 +167,20 @@ class MultiLabelClassificationHead(nn.Module):
         Returns:
             loss: Scalar loss value
         """
-        # Apply label smoothing if specified
         if self.label_smoothing > 0:
             targets = targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
         
-        # Binary cross entropy with logits
         loss = F.binary_cross_entropy_with_logits(logits, targets.float())
         
         return loss
 
 
 class ReconstructionHead(nn.Module):
-    """
-    Reconstruction Head
-    Used for BERT-style pretraining patch reconstruction task
-    """
+    """Patch reconstruction head."""
     def __init__(self, embed_dim, patch_dim, hidden_dims=None, dropout=0.1, 
                  activation='gelu', use_norm=True):
         super().__init__()
         
-        # Build MLP layers
         if hidden_dims is None:
             hidden_dims = [embed_dim]
         elif isinstance(hidden_dims, int):
@@ -224,7 +189,6 @@ class ReconstructionHead(nn.Module):
         layers = []
         prev_dim = embed_dim
         
-        # Hidden layers
         for hidden_dim in hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
@@ -235,7 +199,6 @@ class ReconstructionHead(nn.Module):
                 layers.append(nn.LayerNorm(hidden_dim))
             prev_dim = hidden_dim
         
-        # Output layer
         layers.append(nn.Linear(prev_dim, patch_dim))
         
         self.head = nn.Sequential(*layers)
@@ -264,7 +227,6 @@ class RegressionHead(nn.Module):
         self.pooling = pooling
         self.output_activation = output_activation
         
-        # Build MLP layers
         if hidden_dims is None:
             hidden_dims = [embed_dim]
         elif isinstance(hidden_dims, int):
@@ -273,11 +235,9 @@ class RegressionHead(nn.Module):
         layers = []
         prev_dim = embed_dim
         
-        # Input layer normalization
         if use_norm:
             layers.append(nn.LayerNorm(prev_dim))
         
-        # Hidden layers
         for hidden_dim in hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
@@ -286,7 +246,6 @@ class RegressionHead(nn.Module):
             ])
             prev_dim = hidden_dim
         
-        # Output layer
         layers.append(nn.Linear(prev_dim, output_dim))
         
         self.head = nn.Sequential(*layers)
@@ -317,13 +276,10 @@ class RegressionHead(nn.Module):
         Returns:
             [B, output_dim] - Regression output
         """
-        # Pooling
         pooled = self.pool_features(x)
         
-        # Regression
         output = self.head(pooled)
         
-        # Output activation
         if self.output_activation == 'sigmoid':
             output = torch.sigmoid(output)
         elif self.output_activation == 'tanh':
@@ -404,7 +360,6 @@ class MultiTaskHead(nn.Module):
         super().__init__()
         self.task_names = list(task_configs.keys())
         
-        # Shared feature transformation (optional)
         if shared_hidden_dim:
             self.shared_transform = nn.Sequential(
                 nn.LayerNorm(embed_dim),
@@ -417,7 +372,6 @@ class MultiTaskHead(nn.Module):
             self.shared_transform = nn.Identity()
             feature_dim = embed_dim
         
-        # Create head for each task
         self.task_heads = nn.ModuleDict()
         for task_name, config in task_configs.items():
             task_type = config['type']
@@ -468,10 +422,8 @@ class MultiTaskHead(nn.Module):
         Returns:
             dict: {task_name: task_output} - Outputs for each task
         """
-        # Shared feature transformation
         shared_features = self.shared_transform(x)
         
-        # Task-specific predictions
         outputs = {}
         for task_name in self.task_names:
             outputs[task_name] = self.task_heads[task_name](shared_features)
@@ -523,13 +475,10 @@ class ContrastiveHead(nn.Module):
         Returns:
             [B, projection_dim] - Projected features
         """
-        # Pooling
         pooled = self.pool_features(x)
         
-        # Projection
         projected = self.projector(pooled)
         
-        # L2 normalization
         if self.normalize:
             projected = F.normalize(projected, p=2, dim=1)
         

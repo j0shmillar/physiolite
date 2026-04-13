@@ -1,12 +1,4 @@
-"""
-Wavelet Processing Modules
-Contains learnable wavelet filters, adaptive wavelet selectors, and other components
-for multi-scale time-frequency analysis of physiological signals.
-
-This module implements the core wavelet decomposition pipeline described in the paper,
-including learnable filters that adapt to signal characteristics and cross-scale
-feature fusion mechanisms.
-"""
+"""Wavelet-processing blocks used by PhysioWave."""
 
 import math
 import torch
@@ -38,16 +30,13 @@ def load_wavelet_kernel(wave_name, kernel_size):
     dec_lo_t = torch.tensor(dec_lo, dtype=torch.float)
     dec_hi_t = torch.tensor(dec_hi, dtype=torch.float)
 
-    # Resample filters to match desired kernel size using interpolation
     if len(dec_lo_t) != kernel_size:
         dec_lo_t = dec_lo_t.view(1,1,-1)
         dec_lo_t = F.interpolate(dec_lo_t, size=kernel_size, mode='linear', align_corners=True).squeeze()
-        # Preserve L1 norm after interpolation to maintain filter properties
         dec_lo_t = dec_lo_t * (torch.sum(torch.tensor(dec_lo)) / torch.sum(dec_lo_t))
     if len(dec_hi_t) != kernel_size:
         dec_hi_t = dec_hi_t.view(1,1,-1)
         dec_hi_t = F.interpolate(dec_hi_t, size=kernel_size, mode='linear', align_corners=True).squeeze()
-        # Preserve L1 norm for high-pass filter
         dec_hi_t = dec_hi_t * (torch.sum(torch.abs(torch.tensor(dec_hi))) / torch.sum(torch.abs(dec_hi_t)))
     return dec_lo_t, dec_hi_t
 
@@ -75,25 +64,19 @@ class LearnableWaveFilter(nn.Module):
         self.wave_init = wave_init
         self.separate_per_channel = separate_per_channel
 
-        # Initialize filters from standard wavelet
         low_init, high_init = load_wavelet_kernel(wave_init, kernel_size)
         
-        # Groups parameter determines if filters are shared across channels
         groups = in_ch if separate_per_channel else 1
 
-        # Create depthwise or regular convolution layers for wavelet decomposition
         self.low_filter = nn.Conv1d(in_ch, in_ch, kernel_size, padding=kernel_size//2, groups=groups, bias=False)
         self.high_filter = nn.Conv1d(in_ch, in_ch, kernel_size, padding=kernel_size//2, groups=groups, bias=False)
         
-        # Initialize convolution weights with wavelet coefficients
         with torch.no_grad():
             if separate_per_channel:
-                # Each channel gets its own learnable filter
                 for c in range(in_ch):
                     self.low_filter.weight[c,0,:] = low_init
                     self.high_filter.weight[c,0,:] = high_init
             else:
-                # All channels share the same filter
                 self.low_filter.weight[0,0,:] = low_init
                 self.high_filter.weight[0,0,:] = high_init
 
@@ -110,7 +93,6 @@ class LearnableWaveFilter(nn.Module):
         """
         approx = self.low_filter(x)
         detail = self.high_filter(x)
-        # Downsample by factor of 2 (standard wavelet decimation)
         return approx[..., ::2], detail[..., ::2]
 
 
@@ -133,17 +115,13 @@ class AdaptiveWaveletSelector(nn.Module):
         """
         super().__init__()
         if wavelet_names is None:
-            # Default wavelet bases as mentioned in the paper
             wavelet_names = ['db4','db6','sym4','coif3']
         
-        # Create a bank of learnable wavelet filters
         self.wavelet_filters = nn.ModuleList([
             LearnableWaveFilter(in_ch, kernel_size, wname, separate_per_channel)
             for wname in wavelet_names
         ])
         
-        # Selection network: uses global average pooling followed by MLP
-        # to compute selection weights for each wavelet basis
         self.selector = nn.Sequential(
             nn.AdaptiveAvgPool1d(1),  # Global average pooling
             nn.Flatten(),
@@ -166,18 +144,15 @@ class AdaptiveWaveletSelector(nn.Module):
         """
         B, C, T = x.shape
         
-        # Compute selection weights based on input characteristics
         weights = self.selector(x)  # [B, num_wavelets]
         
         approx_list, detail_list = [], []
-        # Apply each wavelet and weight by selection score
         for i, filt in enumerate(self.wavelet_filters):
             a, d = filt(x)
             w = weights[:, i].view(B,1,1)  # Reshape for broadcasting
             approx_list.append(a * w)
             detail_list.append(d * w)
         
-        # Sum weighted decompositions
         return sum(approx_list), sum(detail_list)
 
 
@@ -205,18 +180,14 @@ class ChannelAggregationFFN(nn.Module):
         super().__init__()
         hid = int(embed_dims*ffn_ratio)
         
-        # 1x1 convolution for channel mixing
         self.fc1 = nn.Conv2d(embed_dims, hid, 1)
-        # Depthwise convolution for spatial processing
         self.dw = nn.Conv2d(hid, hid, kernel_size, padding=kernel_size//2, groups=hid)
         self.act = nn.GELU()
         self.fc2 = nn.Conv2d(hid, embed_dims,1)
         self.drop = nn.Dropout(dropout)
         
-        # Decomposition branch for removing DC component
         self.decomp = nn.Conv2d(hid,1,1)
         self.decomp_act = nn.GELU()
-        # Learnable residual scaling
         self.sigma = ElementScale([1,hid,1,1])
         
     def forward(self, x):
@@ -234,7 +205,6 @@ class ChannelAggregationFFN(nn.Module):
         out = self.act(out)
         out = self.drop(out)
         
-        # Decompose and subtract mean component
         t = self.decomp_act(self.decomp(out))
         out = out - t
         out = out + self.sigma(out)  # Scaled residual
@@ -255,9 +225,7 @@ class CrossScaleCAFFN(nn.Module):
     def __init__(self, embed_dims, ffn_ratio=4., kernel_size=3, dropout=0.1):
         super().__init__()
         self.base = ChannelAggregationFFN(embed_dims, ffn_ratio, kernel_size, dropout)
-        # Multi-head attention for cross-scale feature fusion
         self.attn = nn.MultiheadAttention(embed_dims, num_heads=4, batch_first=True)
-        # Learnable scaling factor for attention output
         self.scale = nn.Parameter(torch.tensor(0.1))
         
     def forward(self, x, prev_feats=[]):
@@ -275,14 +243,10 @@ class CrossScaleCAFFN(nn.Module):
         
         if prev_feats:
             B,C,H,W = out.shape
-            # Reshape for attention: [B, H*W, C]
             q = out.permute(0,2,3,1).reshape(B,-1,C)
-            # Concatenate all previous scale features as keys/values
             ks = torch.cat([pf.permute(0,2,3,1).reshape(B,-1,C) for pf in prev_feats],dim=1)
-            # Apply cross-scale attention
             attn_out,_ = self.attn(q, ks, ks, need_weights=False)
             attn_out = attn_out.view(B,H,W,C).permute(0,3,1,2)
-            # Add scaled attention output
             out = out + self.scale * attn_out
         return out
 
@@ -315,7 +279,6 @@ class MultiHeadGate(nn.Module):
         B,C,T = x.shape
         x_pool = x.mean(-1)  # Global average pooling
         
-        # Multi-head attention computation
         Q = self.q(x_pool).view(B,self.num_heads,-1)
         K = self.k(x_pool).view(B,self.num_heads,-1)
         V = self.v(x_pool).view(B,self.num_heads,-1)
@@ -356,19 +319,15 @@ class SoftGateWaveletDecomp(nn.Module):
         super().__init__()
         self.max_level = max_level
         
-        # Adaptive wavelet selector (Section 2.1 - Adaptive Wavelet Selector)
         self.selector = AdaptiveWaveletSelector(in_channels, wavelet_names, kernel_size, use_separate_channel)
         
-        # Multi-head gating for soft decomposition
         self.gate = MultiHeadGate(in_channels)
         
-        # Cross-scale CAFFN modules for each decomposition level
         self.sub_ffn = nn.ModuleList([
             CrossScaleCAFFN(2*in_channels, ffn_ratio, ffn_kernel_size, ffn_drop)
             for _ in range(max_level)
         ])
         
-        # Learnable residual scales for each level
         self.res_scales = nn.ParameterList([nn.Parameter(torch.zeros(1)) for _ in range(max_level)])
         
     def forward(self, x):
@@ -393,33 +352,23 @@ class SoftGateWaveletDecomp(nn.Module):
         prev_feats, bands = [], []
         
         for i in range(self.max_level):
-            # Wavelet decomposition at current level
             a2, d2 = self.selector(approx)
             
-            # Upsample to original size for soft gating
             up_a = F.interpolate(a2.unsqueeze(1), size=(C,T), mode='nearest').squeeze(1)
             up_d = F.interpolate(d2.unsqueeze(1), size=(C,T), mode='nearest').squeeze(1)
             
-            # Soft gating: blend original and upsampled signals
-            # This prevents aliasing and preserves important details
             g = self.gate(approx)
             new_a = g*approx + (1-g)*up_a  # Gated approximation
             new_d = g*detail_accum + (1-g)*up_d  # Gated details
             
-            # Cross-scale feature fusion
-            # Concatenate approximation and detail for processing
             sb = torch.cat([new_a,new_d],dim=1).unsqueeze(2)  # [B, 2C, 1, T]
-            # Apply CAFFN with cross-scale attention
             out2 = sb + self.res_scales[i] * self.sub_ffn[i](sb, prev_feats)
             out2 = out2.squeeze(2)
             
-            # Update for next iteration
             approx, detail_accum = out2[:,:C], out2[:,C:]
             prev_feats.append(sb)
             bands.append(detail_accum)
         
-        # Add final approximation band
         bands.append(approx)
         
-        # Concatenate all frequency bands to form Spec(X)
         return torch.cat(bands,dim=1)  # [B, (max_level+1)*C, T]

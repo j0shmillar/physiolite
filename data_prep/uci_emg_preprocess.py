@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-"""
-UCI EMG for Gestures -> HDF5
-
-Supports both unfiltered and filtered preprocessing in one script.
-
-Pipeline:
-- Read per-subject TXT files (10 columns: time, 8 EMG, class)
-- Drop labels 0 and 7; remap labels 1..6 -> 0..5
-- Trim run edges; window within contiguous gesture runs
-- Optional filtering on continuous signal (--enable_filtering)
-- Normalization:
-  - filtered path: per-subject per-channel z-score
-  - unfiltered path: per-window max-abs (default) OR per-subject z-score (--zscore_per_subject)
-
-Output HDF5 datasets:
-- data: [N, C, L]
-- label: [N]
-- subject: [N] (optional)
-"""
+"""Preprocess UCI EMG for Gestures into HDF5 splits."""
 
 from __future__ import annotations
 
@@ -74,9 +56,9 @@ def read_subject_txts(subject_dir: Path) -> np.ndarray:
 
 
 def maxabs_normalize(x: np.ndarray) -> np.ndarray:
-    m = np.max(np.abs(x), axis=1, keepdims=True)
-    m[m == 0] = 1.0
-    return x / m
+    scale = np.max(np.abs(x), axis=1, keepdims=True)
+    scale[scale == 0] = 1.0
+    return x / scale
 
 
 def zscore_per_channel(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
@@ -209,8 +191,8 @@ def process_subject(
     seq_len: int,
     edge_trim: int,
     min_len: int,
-    use_zscore_subject: bool,
     stride: Optional[int],
+    normalization: str,
     enable_filtering: bool,
     fs: float,
     band_low: float,
@@ -237,17 +219,18 @@ def process_subject(
         )
         ch_mean = emg_f.mean(axis=1).astype(np.float32)
         ch_std = np.maximum(emg_f.std(axis=1).astype(np.float32), STD_FLOOR)
-        emg_proc = zscore_apply_ct(emg_f, ch_mean, ch_std, clip_value=clip_value)
-        apply_window_maxabs = False
+        if normalization == "zscore":
+            emg_proc = zscore_apply_ct(emg_f, ch_mean, ch_std, clip_value=clip_value)
+        else:
+            emg_proc = maxabs_normalize(emg_f).astype(np.float32)
     else:
         emg_proc = emg
-        if use_zscore_subject:
+        if normalization == "zscore":
             ch_mean = emg_proc.mean(axis=1, keepdims=True)
-            ch_std = emg_proc.std(axis=1, keepdims=True)
+            ch_std = np.maximum(emg_proc.std(axis=1, keepdims=True), STD_FLOOR)
             emg_proc = zscore_per_channel(emg_proc, ch_mean, ch_std)
-            apply_window_maxabs = False
         else:
-            apply_window_maxabs = True
+            emg_proc = maxabs_normalize(emg_proc).astype(np.float32)
 
     runs = extract_runs(labels)
     windows: List[Tuple[np.ndarray, int]] = []
@@ -272,10 +255,7 @@ def process_subject(
             np.zeros((0,), dtype=np.int64),
         )
 
-    if apply_window_maxabs:
-        X = np.stack([maxabs_normalize(w) for (w, _) in windows]).astype(np.float32)
-    else:
-        X = np.stack([w for (w, _) in windows]).astype(np.float32)
+    X = np.stack([w for (w, _) in windows]).astype(np.float32)
     y = np.array([lab for (_, lab) in windows], dtype=np.int64)
     return X, y
 
@@ -312,19 +292,15 @@ def main():
     ap.add_argument("--out_dir", type=str, required=True)
 
     ap.add_argument("--seq_len", type=int, default=1024)
-    ap.add_argument("--min_len", type=int, default=200)
-    ap.add_argument("--edge_trim", type=int, default=20)
-    ap.add_argument("--stride", type=int, default=0)
-
-    ap.add_argument("--zscore_per_subject", action="store_true",
-                    help="Use subject-wise per-channel z-score in unfiltered mode.")
-
-    # Optional filtering
+    ap.add_argument("--min_len", type=int, default=1024)
+    ap.add_argument("--edge_trim", type=int, default=0)
+    ap.add_argument("--stride", type=int, default=512)
+    ap.add_argument("--normalization", type=str, default="maxabs", choices=["maxabs", "zscore"])
     ap.add_argument("--enable_filtering", action="store_true",
                     help="Enable bandpass+notch filtering before normalization.")
-    ap.add_argument("--fs", type=float, default=1000.0, help="Sampling rate for filtering")
+    ap.add_argument("--fs", type=float, default=200.0, help="Sampling rate for filtering")
     ap.add_argument("--band_low", type=float, default=20.0)
-    ap.add_argument("--band_high", type=float, default=450.0)
+    ap.add_argument("--band_high", type=float, default=190.0)
     ap.add_argument("--band_order", type=int, default=4)
     ap.add_argument("--notch_freq", type=float, default=50.0)
     ap.add_argument("--notch_q", type=float, default=30.0)
@@ -355,13 +331,9 @@ def main():
             f"Filtering: ON (bandpass {args.band_low}-{args.band_high} Hz, order={args.band_order}; "
             f"notch {args.notch_freq} Hz, Q={args.notch_q})"
         )
-        print("Normalization: per-subject per-channel z-score")
-    elif args.zscore_per_subject:
-        print("Filtering: OFF")
-        print("Normalization: subject-wise per-channel z-score")
     else:
         print("Filtering: OFF")
-        print("Normalization: per-window max-abs")
+        print(f"Normalization: {args.normalization}")
 
     val_subs = parse_split_arg(args.val_subjects)
     test_subs = parse_split_arg(args.test_subjects)
@@ -384,8 +356,8 @@ def main():
                     seq_len=args.seq_len,
                     edge_trim=args.edge_trim,
                     min_len=args.min_len,
-                    use_zscore_subject=args.zscore_per_subject,
                     stride=args.stride,
+                    normalization=args.normalization,
                     enable_filtering=args.enable_filtering,
                     fs=args.fs,
                     band_low=args.band_low,

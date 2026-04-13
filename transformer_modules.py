@@ -1,7 +1,4 @@
-"""
-Transformer Core Modules
-Contains RoPE attention, Transformer blocks, Patch embedding, etc.
-"""
+"""Transformer blocks used by PhysioWave."""
 
 import math
 import torch
@@ -133,14 +130,12 @@ class RoPEAttention(nn.Module):
         qkv = self.qkv(x).reshape(B,N,3,self.num_heads,self.hd).permute(2,0,3,1,4)
         q,k,v = qkv[0],qkv[1],qkv[2]
         
-        # Apply RoPE
         if self.rope_dim>0 and self.rope_dim<=self.hd:
             qr,rem = q[...,:self.rope_dim],q[...,self.rope_dim:]
             kr,_   = k[...,:self.rope_dim],k[...,self.rope_dim:]
             qr = self.rope_q(qr,seq_len=N); kr = self.rope_k(kr,seq_len=N)
             q = torch.cat([qr,rem],dim=-1); k = torch.cat([kr,_],dim=-1)
         
-        # Attention computation
         attn = (q @ k.transpose(-2,-1))*self.scale
         if mask is not None: attn = attn+mask
         attn = attn.softmax(-1); attn = self.attn_drop(attn)
@@ -259,30 +254,24 @@ class PositionEmbedding(nn.Module):
         B, L, D = tokens.shape
         
         if self.pos_type == '1d':
-            # 1D position encoding
             if self.pos_embed is not None and L <= self.pos_embed.shape[1]:
                 pos_embed = self.pos_embed[:, :L, :]
             else:
-                # Generate dynamically
                 pos_embed = self.get_1d_sincos_pos_embed_from_grid(D, torch.arange(L, dtype=torch.float32))
                 pos_embed = pos_embed.unsqueeze(0)
             
             return tokens + pos_embed.to(tokens.device)
         
         elif self.pos_type == '2d':
-            # 2D position encoding
             if freq_size is None or time_size is None:
-                # Fall back to 1D
                 pos_embed = self.get_1d_sincos_pos_embed_from_grid(D, torch.arange(L, dtype=torch.float32))
                 pos_embed = pos_embed.unsqueeze(0)
             else:
                 expected_patches = freq_size * time_size
                 if L != expected_patches:
-                    # Patch count mismatch, use 1D
                     pos_embed = self.get_1d_sincos_pos_embed_from_grid(D, torch.arange(L, dtype=torch.float32))
                     pos_embed = pos_embed.unsqueeze(0)
                 else:
-                    # 2D position encoding
                     pos_embed = self.get_2d_sincos_pos_embed(D, freq_size, time_size)
                     pos_embed = pos_embed.unsqueeze(0)
             

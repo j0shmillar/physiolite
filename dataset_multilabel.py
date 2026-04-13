@@ -1,8 +1,4 @@
-"""
-Multi-Label Classification Data Loader Module
-Supports loading and preprocessing of time series data for multi-label classification
-Supports loading multiple HDF5 files
-"""
+"""Dataset loaders for single-label and multilabel HDF5 data."""
 
 import os
 import h5py
@@ -34,13 +30,11 @@ class MultiLabelTimeSeriesDataset(Dataset):
         """
         super().__init__()
         
-        # Unified handling of file paths
         if isinstance(file_paths, str):
             self.file_paths = [file_paths]
         else:
             self.file_paths = list(file_paths)
         
-        # Check if files exist
         for file_path in self.file_paths:
             if not os.path.isfile(file_path):
                 raise FileNotFoundError(f"File {file_path} not found.")
@@ -50,7 +44,6 @@ class MultiLabelTimeSeriesDataset(Dataset):
         self.transform = transform
         self.max_length = max_length
         
-        # Load all data
         self._load_all_data()
     
     def _load_all_data(self):
@@ -64,7 +57,6 @@ class MultiLabelTimeSeriesDataset(Dataset):
             print(f"  Loading file {i+1}/{len(self.file_paths)}: {os.path.basename(file_path)}")
             
             with h5py.File(file_path, "r") as h5f:
-                # Try different key names for data
                 data = None
                 for key in [self.data_key, 'input', 'data', 'X']:
                     if key in h5f:
@@ -77,7 +69,6 @@ class MultiLabelTimeSeriesDataset(Dataset):
                     raise KeyError(f"Data key not found in {file_path}. "
                                  f"Available keys: {list(h5f.keys())}")
                 
-                # Load labels
                 labels = None
                 for key in [self.label_key, 'label', 'labels', 'y', 'Y']:
                     if key in h5f:
@@ -96,7 +87,6 @@ class MultiLabelTimeSeriesDataset(Dataset):
                 print(f"    Data shape: {data.shape}")
                 print(f"    Labels shape: {labels.shape}")
         
-        # Combine all data
         self._data = np.concatenate(all_data, axis=0)
         self._labels = np.concatenate(all_labels, axis=0)
         self._num_samples = len(self._data)
@@ -106,14 +96,12 @@ class MultiLabelTimeSeriesDataset(Dataset):
         print(f"  Labels shape: {self._labels.shape}")
         print(f"  Total samples: {self._num_samples}")
         
-        # Check if labels are multi-hot encoded
         if len(self._labels.shape) == 1:
             raise ValueError(f"Labels should be 2D (N, num_classes) for multi-label classification, "
                            f"got shape {self._labels.shape}")
         
         self.num_classes = self._labels.shape[1]
         
-        # Print label statistics
         label_counts = self._labels.sum(axis=0)
         avg_labels_per_sample = self._labels.sum(axis=1).mean()
         
@@ -128,33 +116,26 @@ class MultiLabelTimeSeriesDataset(Dataset):
         return self._num_samples
 
     def __getitem__(self, idx):
-        # Get data
         x = self._data[idx].copy()  # => shape (C, T)
         
-        # Length processing
         if self.max_length is not None:
             current_length = x.shape[-1]
             
             if current_length > self.max_length:
-                # Random crop for training, center crop for validation
                 if self.transform and hasattr(self.transform, 'random_crop') and self.transform.random_crop:
                     start = np.random.randint(0, current_length - self.max_length + 1)
                     x = x[:, start:start + self.max_length]
                 else:
-                    # Center crop
                     start = (current_length - self.max_length) // 2
                     x = x[:, start:start + self.max_length]
             
             elif current_length < self.max_length:
-                # Pad to specified length
                 pad_length = self.max_length - current_length
                 x = np.pad(x, ((0, 0), (0, pad_length)), mode='constant', constant_values=0)
         
-        # Convert to tensor
         x = torch.tensor(x, dtype=torch.float32)
         y = torch.tensor(self._labels[idx], dtype=torch.float32)  # Multi-hot labels as float
         
-        # Apply transformation
         if self.transform:
             x = self.transform(x)
         
@@ -206,7 +187,6 @@ class SingleLabelTimeSeriesDataset(Dataset):
             print(f"  Loading file {i+1}/{len(self.file_paths)}: {os.path.basename(file_path)}")
             
             with h5py.File(file_path, "r") as h5f:
-                # Try different key names
                 data = None
                 for key in [self.data_key, 'input', 'data', 'X']:
                     if key in h5f:
@@ -298,12 +278,10 @@ class DataAugmentation:
         if torch.rand(1) > self.prob:
             return x
         
-        # Add noise
         if self.noise_std > 0:
             noise = torch.randn_like(x) * self.noise_std
             x = x + noise
         
-        # Amplitude scaling
         if self.amplitude_scale_range != (1.0, 1.0):
             scale = torch.FloatTensor(1).uniform_(*self.amplitude_scale_range).item()
             x = x * scale
@@ -357,7 +335,6 @@ def get_dataset_stats(file_paths: Union[str, List[str]],
         with h5py.File(file_path, "r") as h5f:
             print(f"    Available keys: {list(h5f.keys())}")
             
-            # Find data key
             data = None
             for key in [data_key, 'input', 'data', 'X']:
                 if key in h5f:
@@ -373,7 +350,6 @@ def get_dataset_stats(file_paths: Union[str, List[str]],
                 print(f"    Data std: {np.std(data):.4f}")
                 all_data.append(data)
             
-            # Find label key
             labels = None
             for key in [label_key, 'label', 'labels', 'y', 'Y']:
                 if key in h5f:

@@ -1,7 +1,4 @@
-"""
-BERT-style Wavelet Transformer Main Model
-Refactored version with modular design and clear component separation
-"""
+"""PhysioWave model definition."""
 
 import torch
 import torch.nn as nn
@@ -14,52 +11,35 @@ from head_modules import ClassificationHead, ReconstructionHead, RegressionHead,
 
 
 class BERTWaveletTransformer(nn.Module):
-    """
-    BERT-style Wavelet Transformer Main Model
-    
-    Modular Design:
-    1. Wavelet Decomposition Module: SoftGateWaveletDecomp
-    2. Patch Embedding: PatchEmbed  
-    3. Position Encoding: PositionEmbedding
-    4. Transformer Encoder: TransformerEncoder
-    5. Task Heads: Various Head modules
-    """
+    """Wavelet-transformer backbone with task heads."""
     def __init__(self,
-                 # Wavelet parameters
                  in_channels=8, 
                  max_level=3,
                  wave_kernel_size=16,
                  wavelet_names=None,
                  use_separate_channel=True,
-                 # Patch embedding parameters
                  patch_size=(1,20),
                  embed_dim=128,
-                 # Transformer parameters
                  depth=6,
                  num_heads=8,
                  mlp_ratio=4.0,
                  dropout=0.1,
                  rope_dim=None,
-                 # Position encoding parameters
                  use_pos_embed=True,
                  pos_embed_type='2d',
-                 # Masking parameters
                  masking_strategy='frequency_guided',
                  importance_ratio=0.6,
                  mask_ratio=0.15,
-                 # Task head parameters
-                 task_type=None,  # 'classification', 'regression', 'pretrain', 'multilabel'
+                 task_type=None,
                  num_labels=None,
                  num_classes=None,
                  output_dim=None,
                  head_config=None,
                  pooling='mean',
-                 # Memory settings
-                 use_activation_checkpointing: bool = False  # <— NEW
+                 use_activation_checkpointing: bool = False
                  ):
         super().__init__()
         
-        # Save configuration
         self.in_channels = in_channels
         self.max_level = max_level
         self.patch_size = patch_size
@@ -70,12 +50,10 @@ class BERTWaveletTransformer(nn.Module):
         self.importance_ratio = importance_ratio
         self.mask_ratio = mask_ratio
         self.task_type = task_type
-        self.use_activation_checkpointing = use_activation_checkpointing  # NEW
+        self.use_activation_checkpointing = use_activation_checkpointing
         
-        # Calculate patch dimension
         self.patch_dim = patch_size[0] * patch_size[1]
         
-        # 1. Wavelet decomposition module
         self.wavelet_decomp = SoftGateWaveletDecomp(
             in_channels=in_channels,
             max_level=max_level,
@@ -87,14 +65,12 @@ class BERTWaveletTransformer(nn.Module):
             ffn_drop=0.1
         )
         
-        # 2. Patch embedding module
         self.patch_embed = PatchEmbed(
             input_channels=1,
             patch_size=patch_size,
             embed_dim=embed_dim
         )
         
-        # 3. Position encoding module
         if use_pos_embed:
             self.pos_embed = PositionEmbedding(
                 embed_dim=embed_dim,
@@ -103,10 +79,8 @@ class BERTWaveletTransformer(nn.Module):
         else:
             self.pos_embed = None
         
-        # 4. MASK token (for pretraining)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         
-        # 5. Transformer encoder
         self.encoder = TransformerEncoder(
             embed_dim=embed_dim,
             depth=depth,
@@ -116,10 +90,8 @@ class BERTWaveletTransformer(nn.Module):
             rope_dim=rope_dim
         )
         
-        # 6. Task head modules
         self.task_heads = nn.ModuleDict()
         
-        # Pretraining reconstruction head
         self.task_heads['pretrain'] = ReconstructionHead(
             embed_dim=embed_dim,
             patch_dim=self.patch_dim,
@@ -127,7 +99,6 @@ class BERTWaveletTransformer(nn.Module):
             dropout=dropout
         )
         
-        # Add corresponding head based on task type
         if task_type == 'multilabel' and num_labels is not None:
             head_config = head_config or {}
             self.task_heads['multilabel'] = MultiLabelClassificationHead(
@@ -169,7 +140,6 @@ class BERTWaveletTransformer(nn.Module):
                 use_norm=head_config.get('use_norm', False)
             )
         
-        # Weight initialization
         self.apply(self._init_weights)
         
     def _init_weights(self, m):
@@ -195,25 +165,20 @@ class BERTWaveletTransformer(nn.Module):
         B, L, D = tokens.shape
         num_mask = int(L * mask_ratio)
 
-        # Calculate frequency domain importance
         tokens_reshaped = tokens.permute(0, 2, 1)
         tokens_fft = torch.abs(torch.fft.rfft(tokens_reshaped, dim=2))
         importance_scores = torch.sum(tokens_fft, dim=1)
         
-        # Interpolate to original length
         importance_full = F.interpolate(
             importance_scores.unsqueeze(1), size=L,
             mode='linear', align_corners=True
         ).squeeze(1)
 
-        # Mix randomness and importance
         random_noise = torch.rand(B, L, device=tokens.device)
         combined_scores = importance_ratio * importance_full + (1 - importance_ratio) * random_noise
 
-        # Select positions with highest scores for masking
         _, mask_indices = torch.topk(combined_scores, num_mask, dim=1)
         
-        # Create mask
         mask = torch.zeros(B, L, device=tokens.device, dtype=torch.bool)
         mask.scatter_(1, mask_indices, True)
         
@@ -224,10 +189,8 @@ class BERTWaveletTransformer(nn.Module):
         B, L, D = tokens.shape
         num_mask = int(L * mask_ratio)
         
-        # Randomly select mask positions
         mask_indices = torch.randperm(L, device=tokens.device)[:num_mask].unsqueeze(0).repeat(B, 1)
         
-        # Create mask
         mask = torch.zeros(B, L, device=tokens.device, dtype=torch.bool)
         mask.scatter_(1, mask_indices, True)
         
@@ -237,10 +200,8 @@ class BERTWaveletTransformer(nn.Module):
         """Apply masking: replace masked positions with [MASK] token"""
         B, L, D = tokens.shape
         
-        # Clone tokens
         masked_tokens = tokens.clone()
         
-        # Replace masked positions with [MASK] token
         mask_token_expanded = self.mask_token.expand(B, L, D)
         masked_tokens[mask] = mask_token_expanded[mask]
         
@@ -264,11 +225,9 @@ class BERTWaveletTransformer(nn.Module):
         """Prepare tokens and add position encoding"""
         B, C, F, T = x.shape
         
-        # Patch embedding
         tokens = self.patch_embed(x)
         _, L, D = tokens.shape
         
-        # Add position encoding
         if self.pos_embed is not None:
             if self.pos_embed_type == '2d':
                 p_f, p_t = self.patch_size
@@ -284,24 +243,19 @@ class BERTWaveletTransformer(nn.Module):
         """Run encoder with optional activation checkpointing to save memory."""
         if self.use_activation_checkpointing:
             try:
-                # Non-reentrant is generally recommended in newer PyTorch
                 return _ckpt(self.encoder, tokens, use_reentrant=False)
             except TypeError:
-                # Backward-compat for older PyTorch
                 return _ckpt(self.encoder, tokens)
         else:
             return self.encoder(tokens)
 
     def forward_features(self, x):
         """Extract features (encoder part)"""
-        # 1. Wavelet decomposition
         wave_spec = self.wavelet_decomp(x)
         wave_2d = wave_spec.unsqueeze(1)
         
-        # 2. Patch embedding and position encoding
         tokens = self.prepare_tokens(wave_2d)
         
-        # 3. Transformer encoding (with optional checkpointing)
         features = self._encode_with_optional_ckpt(tokens)
         
         return features
@@ -311,29 +265,22 @@ class BERTWaveletTransformer(nn.Module):
         if mask_ratio is None:
             mask_ratio = self.mask_ratio
             
-        # Wavelet decomposition
         wave_spec = self.wavelet_decomp(x)
         wave_2d = wave_spec.unsqueeze(1)
         
-        # Patch embedding and position encoding
         tokens = self.prepare_tokens(wave_2d)
         
-        # Get original patches as reconstruction target
         target_patches = self.patchify(wave_2d)
         
-        # Select mask positions
         if self.masking_strategy == 'frequency_guided':
             mask = self.frequency_guided_masking(tokens, mask_ratio, self.importance_ratio)
         else:  # 'random'
             mask = self.random_masking(tokens, mask_ratio)
         
-        # Apply masking
         masked_tokens = self.apply_masking(tokens, mask)
         
-        # Encoder processing (with optional checkpointing)
         encoded_tokens = self._encode_with_optional_ckpt(masked_tokens)
         
-        # Reconstruction head prediction
         pred_patches = self.task_heads['pretrain'](encoded_tokens)
         
         return pred_patches, mask, target_patches
@@ -344,11 +291,9 @@ class BERTWaveletTransformer(nn.Module):
         if task_name not in self.task_heads:
             raise ValueError(f"Task head '{task_name}' not found. Available: {list(self.task_heads.keys())}")
         
-        # Extract features
         features = self.forward_features(x)
         
 
-        # Only MultiLabelClassificationHead supports return_logits; others ignore extra kwargs
         if task_name == 'multilabel':
             output = self.task_heads[task_name](features, **head_kwargs)
         else:
@@ -378,7 +323,6 @@ class BERTWaveletTransformer(nn.Module):
                 raise ValueError("task_name must be specified for downstream tasks")
             return self.forward_downstream(x, task_name, **head_kwargs)
         else:
-            # Compatibility with old interface
             if task == 'classify' and 'classification' in self.task_heads:
                 return self.forward_downstream(x, 'classification')
             elif task in self.task_heads:
@@ -387,7 +331,6 @@ class BERTWaveletTransformer(nn.Module):
                 raise ValueError(f"Unknown task: {task}")
 
 
-# Convenience constructor functions
 def create_wavelet_classifier(in_channels=8, max_level=3, embed_dim=256, depth=8, 
                              num_heads=8, num_classes=2, **kwargs):
     """Create wavelet classifier"""
@@ -430,4 +373,3 @@ def create_wavelet_pretrain_model(in_channels=8, max_level=3, embed_dim=256, dep
         task_type='pretrain',
         **kwargs
     )
-

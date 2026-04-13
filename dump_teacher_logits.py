@@ -1,4 +1,3 @@
-# dump_teacher_logits.py
 import argparse
 import os
 import torch
@@ -14,8 +13,7 @@ from dataset_multilabel import (
     collate_multilabel_fn,
 )
 
-# Reuse teacher loading utilities from unified KD package.
-from kd.teacher import build_teacher_for_kd, load_physiowave, load_teacher_model_for_eval
+from kd.runner import build_teacher_model, forward_model_logits
 
 
 def main():
@@ -24,9 +22,13 @@ def main():
     ap.add_argument("--teacher_checkpoint", required=True, help="Path to teacher checkpoint (same as KD script)")
     ap.add_argument("--out_h5", required=True, help="Where to write logits (HDF5)")
     ap.add_argument("--task_type", default="classification", choices=["classification", "multilabel"])
+    ap.add_argument("--teacher_model", default="physiowave", choices=["physiowave", "physiowavenpu"])
+    ap.add_argument("--teacher_dataset_profile", default="auto",
+                    choices=["none", "auto", "uci", "db5", "epn612", "ptb", "cpsc", "chapman"])
     ap.add_argument("--data_key", default="data")
     ap.add_argument("--label_key", default="label")
     ap.add_argument("--max_length", type=int, default=512)
+    ap.add_argument("--in_channels", type=int, default=8)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--device", default="cuda:0")
@@ -35,7 +37,6 @@ def main():
 
     device = torch.device(args.device)
 
-    # speed knobs
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
@@ -62,32 +63,33 @@ def main():
         collate_fn=collate_fn,
     )
 
-    # Build teacher
-
-    ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
-    #teacher, _ = load_physiowave()  # builds the exact PhysioWave architecture you used
-    sd = ckpt.get("student_state_dict") or ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
-    #teacher.load_state_dict(sd, strict=True)
-    #teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, "multilabel", num_out, rank=0)
-    teacher, _kind = load_teacher_model_for_eval(
-        args=argparse.Namespace(
-            teacher_model="physiowave",
-            teacher_checkpoint=args.teacher_checkpoint,
-            task_type="classification",           # "multilabel" or "classification"
-            waveformer_patch_width=64,          # unused here; keep something
-            amp_dtype=args.amp_dtype,
-            threshold=0.5,
-            sanity_teacher_test=False,
-        ),
-        device=device,
-        num_outputs=num_out,
-        rank=0,
+    build_args = argparse.Namespace(
+        teacher_model=args.teacher_model,
+        teacher_checkpoint=args.teacher_checkpoint,
+        teacher_dataset_profile=args.teacher_dataset_profile,
+        student_dataset_profile=args.teacher_dataset_profile,
+        train_file=args.data_file,
+        task_type=args.task_type,
+        in_channels=args.in_channels,
+        max_length=args.max_length,
+        patch_size=8,
+        student_depth=3,
+        student_embed_dim=256,
+        student_bank_ch=16,
+        student_reduce=4,
+        student_pos_freqs=8,
+        student_front_pool_k=4,
+        student_post_patch_pool_t=5,
+        student_kernel_set="3,5,7",
+        print_student_config=False,
+        teacher_pe_scale=0.1,
+        student_pe_scale=0.1,
     )
+    teacher, teacher_pe_cache = build_teacher_model(build_args, ds, device, rank=0, kd_outputs=num_out)
     teacher = teacher.to(device).eval()
     for p in teacher.parameters():
         p.requires_grad = False
 
-    # AMP setup
     use_amp = (device.type == "cuda") and (args.amp_dtype != "none")
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
 
@@ -109,9 +111,23 @@ def main():
 
                 if use_amp:
                     with torch.amp.autocast("cuda", dtype=amp_dtype):
-                        t = teacher(x, task="downstream", task_name="classification", return_logits=True)
+                        t = forward_model_logits(
+                            teacher,
+                            x,
+                            arch=args.teacher_model,
+                            args=build_args,
+                            pe_cache=teacher_pe_cache,
+                            pe_scale=build_args.teacher_pe_scale,
+                        )
                 else:
-                    t = teacher(x, task="downstream", task_name=args.task_type, return_logits=True)
+                    t = forward_model_logits(
+                        teacher,
+                        x,
+                        arch=args.teacher_model,
+                        args=build_args,
+                        pe_cache=teacher_pe_cache,
+                        pe_scale=build_args.teacher_pe_scale,
+                    )
 
                 t = t.detach().to("cpu", dtype=torch.float16).numpy()
                 b = t.shape[0]
