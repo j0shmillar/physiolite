@@ -228,7 +228,7 @@ def parse_kernel_set(s: str) -> tuple[int, ...]:
 
 
 STUDENT_DATASET_PROFILES = {
-    #"uci": {"patch_t": 4, "front_pool_k": 3, "post_patch_pool_t": 5, "student_pos_freqs": 8},
+    # "uci": {"patch_t": 4, "front_pool_k": 3, "post_patch_pool_t": 5, "student_pos_freqs": 8},
     "uci": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
     "db5": {"patch_t": 8, "front_pool_k": 4, "post_patch_pool_t": 2, "student_pos_freqs": 8},
     "epn612": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
@@ -990,13 +990,13 @@ class CEPlusSoftF1Macro(nn.Module):
         total = ce_loss + (self.lam * soft_f1_loss)
         return total
     
-def load_physiowave():
+def load_physiowave(num_classes: int, in_channels: int = 8):
     rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{rank}")
+
     head_hidden_dim = 512
     head_dropout = 0.1
     pooling = "mean"
-    in_channels = 8
     max_level = 3
     wave_kernel_size = 16
     wavelet_names = ["sym4", "sym5", "db6", "coif3", "bior4.4"]
@@ -1009,16 +1009,13 @@ def load_physiowave():
     dropout = 0.1
     use_pos_embed = True
     pos_embed_type = "2d"
-    num_classes = 53
-    pretrained_path = "emg.pth"
-    freeze_encoder = False
 
     head_config = {
         'hidden_dims': [head_hidden_dim],
         'dropout': head_dropout,
         'pooling': pooling
     }
-    
+
     model = BERTWaveletTransformer(
         in_channels=in_channels,
         max_level=max_level,
@@ -1038,17 +1035,9 @@ def load_physiowave():
         head_config=head_config,
         pooling=pooling
     ).to(device)
-    
+
     if hasattr(model, 'initialize_weights'):
         model.initialize_weights()
-        print("Initialized model weights")
-    
-    
-    if freeze_encoder:
-        for name, param in model.named_parameters():
-            if 'task_heads' not in name:
-                param.requires_grad = False
-        print("Frozen encoder parameters (excluding task heads)")
 
     return model, None
 
@@ -1162,7 +1151,10 @@ def main_worker(rank, world_size, args):
         print(">> Skipping online teacher forward (cached logits will be used).")
 
     if args.student_arch == "physiowave":
-        student, pe_cache = load_physiowave()
+        student, pe_cache = load_physiowave(
+            num_classes=train_ds.num_classes,
+            in_channels=args.in_channels,
+        )
     else:
         student, pe_cache = build_student(args, train_ds, device, rank)
 
@@ -1515,6 +1507,7 @@ def main(argv=None):
         default="physiowavenpu",
         choices=[
             "physiowavenpu",
+            "physiowave",
         ],
     )
     p.add_argument(
@@ -1616,8 +1609,8 @@ def main(argv=None):
         p.error("--train_file is required (either CLI or via --config).")
     if not args.val_file:
         p.error("--val_file is required (either CLI or via --config).")
-    if not args.teacher_checkpoint:
-        p.error("--teacher_checkpoint is required (either CLI or via --config).")
+    if args.alpha_kd > 0 and not args.teacher_checkpoint and not args.teacher_logits_h5:
+        p.error("--teacher_checkpoint is required when alpha_kd > 0 and no cached teacher logits are provided.")
 
     configure_reproducibility(args.seed, deterministic=args.deterministic)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))

@@ -106,13 +106,25 @@ wget -r -N -c -np https://physionet.org/files/ptb-xl/1.0.3/
 Preprocess:
 
 ```bash
-python data_prep/ecg/ptbxl.py --root "datasets/physionet.org/files/ptb-xl/1.0.3/" --threshold 80
+python data_prep/ptbxl_preprocess.py --root datasets/physionet.org/files/ptb-xl/1.0.3/ --threshold 80.0 --window_size 2048 --step_size 1024
 ```
 
 Filtered variant:
 
 ```bash
-python data_prep/ecg/ptbxl.py --root "datasets/physionet.org/files/ptb-xl/1.0.3/" --threshold 80 --enable_filtering
+python data_prep/ptbxl_preprocess.py \
+  --root datasets/physionet.org/files/ptb-xl/1.0.3/ \
+  --threshold 80.0 \
+  --window_size 2048 \
+  --step_size 1024 \
+  --enable_filtering \
+  --fs 500 \
+  --band_low 0.67 \
+  --band_high 40.0 \
+  --band_order 4 \
+  --notch_freq 50.0 \
+  --notch_q 30.0 \
+  --baseline_kernel_sec 0.4
 ```
 
 ### CPSC
@@ -180,7 +192,7 @@ python -m torch.distributed.run --nproc_per_node=1 --master_port=29810 run_kd.py
 ### PTB
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=29661 run_kd.py --train_file datasets/physionet.org/files/ptb-xl/1.0.3/train.h5 --val_file datasets/physionet.org/files/ptb-xl/1.0.3/val.h5 --test_file datasets/physionet.org/files/ptb-xl/1.0.3/test.h5 --teacher_checkpoint pwave/ptb.pth --in_channels 12 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --use_amp --max_length 2048 --patch_size 16 --output_dir multilabel_ptb_student_replicated --batch_size 32 --accum_steps 1 --task_type classification --alpha_kd 0.2 --student_arch physiowavenpu --student_dataset_profile ptb --teacher_logits_h5 pwave/ptb_logits.h5 --sanity_teacher_test
+python -m torch.distributed.run --nproc_per_node=1 --master_port=29661 run_kd.py --train_file datasets/physionet.org/files/ptb-xl/1.0.3/train.h5 --val_file datasets/physionet.org/files/ptb-xl/1.0.3/val.h5 --test_file datasets/physionet.org/files/ptb-xl/1.0.3/test.h5 --teacher_checkpoint pwave/ptb.pth   --in_channels 12   --epochs 50   --lr 1e-3   --weight_decay 1e-3   --threshold 0.3   --use_amp   --max_length 2048   --patch_size 16    --output_dir multilabel_ptb_student_replicated --batch_size 1 --accum_steps 1  --task_type classification  --alpha_kd 0.2
 ```
 
 ### CPSC
