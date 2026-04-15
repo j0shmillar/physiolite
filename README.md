@@ -62,13 +62,13 @@ unzip emg+data+for+gestures.zip
 Preprocess:
 
 ```bash
-python data_prep/emg/uci_emg.py --root_dir datasets/EMG_data_for_gestures-master/ --out_dir datasets/UCI_EMG_proc --seq_len 1024 --min_len 1024 --edge_trim 0 --stride 512 --val_subjects "33-34" --test_subjects "35-36" --save_subject_ids
+python data_prep/uci_emg_preprocess.py   --root_dir datasets/EMG_data_for_gestures-master   --out_dir datasets/UCI_EMG_proc   --seq_len 1024   --min_len 1024   --edge_trim 120   --stride 512   --zscore_per_subject   --val_subjects "33-34"   --test_subjects "35-36"   --save_subject_ids
 ```
 
 Filtered variant:
 
 ```bash
-python data_prep/emg/uci_emg.py --root_dir datasets/EMG_data_for_gestures-master/ --out_dir datasets/UCI_EMG_proc_filtered --seq_len 1024 --min_len 1024 --edge_trim 0 --stride 512 --val_subjects "33-34" --test_subjects "35-36" --save_subject_ids --enable_filtering
+python data_prep/uci_emg_preprocess.py   --root_dir datasets/EMG_data_for_gestures-master   --out_dir datasets/UCI_EMG_proc_filtered   --seq_len 1024   --min_len 1024   --edge_trim 120   --stride 512   --zscore_per_subject   --val_subjects "33-34"   --test_subjects "35-36"   --save_subject_ids --enable_filtering
 ```
 
 ### EPN-612
