@@ -14,7 +14,7 @@ def main():
     repo_root = Path(__file__).resolve().parents[2]
     out_dir = repo_root / args.out_dir
     path = kagglehub.dataset_download("bobaaayoung/cpsc-2018", output_dir=str(out_dir))
-    print(f"Downloaded CPSC dataset to: {path}")
+    print(f"Data availabe at: {path}")
 
 
 if __name__ == "__main__":

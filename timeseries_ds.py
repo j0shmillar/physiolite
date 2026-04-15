@@ -365,9 +365,8 @@ def get_dataset_stats(file_paths: Union[str, List[str]],
                         print(f"    Labels per class: {label_counts}")
                         print(f"    Avg labels per sample: {labels.sum(axis=1).mean():.2f}")
                     else:
-                        print(f"    Warning: Expected 2D labels for multi-label, got {labels.shape}")
+                        print(f"    WARNING: Expected 2D labels for multi-label, got {labels.shape}")
                 else:
-                    print(f"    Unique labels: {np.unique(labels)}")
                     print(f"    Label distribution: {np.bincount(labels.flatten().astype(int))}")
                 all_labels.append(labels)
     
