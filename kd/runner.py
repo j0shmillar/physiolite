@@ -264,8 +264,7 @@ def apply_student_dataset_profile(args, rank: int):
     if profile == "none":
         if rank == 0:
             print(
-                "!! WARNING: student dataset profile is 'none'. "
-                "Using raw CLI values for patch/front/post-pool/pos-freqs."
+                "!! WARNING: dataset profile is 'none'. "
             )
         return
 
@@ -541,7 +540,7 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
 
     if rank == 0:
         print(f"[{desc_prefix}] Epoch {epoch}: Loss={avg_loss:.4f}")
-        print("  -- True multilabel view (thresholded) --")
+        print("  -- Multilabel view (thresholded) --")
         print(f"  Acc:                    {acc:.4f}")
         print(f"  Precision(micro/macro): {prec_micro:.4f}/{prec_macro:.4f}")
         print(f"  Recall(micro/macro):    {rec_micro:.4f}/{rec_macro:.4f}")
