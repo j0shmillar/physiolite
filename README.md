@@ -31,19 +31,22 @@ Legacy `*_preprocess.py` paths still forward to the same logic.
 
 ### DB5
 
-Download/access:
-- Run `./ninapro_db5.sh` for the expected folder layout and manual download link.
+Download:
+
+```bash
+python data_prep/emg/dl_db5.py
+```
 
 Preprocess:
 
 ```bash
-python data_prep/emg/db5.py --input_data datasets/ninapro_db5/raw/ --output_h5 datasets/db5 --window_size 512 --stride 64
+python data_prep/emg/db5.py --input_data datasets/ninapro_db5/ --output_h5 datasets/db5 --window_size 512 --stride 64
 ```
 
 Filtered variant:
 
 ```bash
-python data_prep/emg/db5.py --input_data datasets/ninapro_db5/raw/ --output_h5 datasets/db5_filtered --window_size 512 --stride 64 --enable_filtering
+python data_prep/emg/db5.py --input_data datasets/ninapro_db5/ --output_h5 datasets/db5_filtered --window_size 512 --stride 64 --enable_filtering
 ```
 
 ### UCI EMG
@@ -96,6 +99,7 @@ python data_prep/emg/epn612.py --source_training "datasets/EMG-EPN612 Dataset/tr
 Download:
 
 ```bash
+cd datasets/
 wget -r -N -c -np https://physionet.org/files/ptb-xl/1.0.3/
 ```
 
@@ -156,13 +160,13 @@ python data_prep/ecg/chapman.py --root_dir datasets/chapman-shaoxing --out_dir d
 ### DB5
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=28881 run_kd.py --train_file datasets/db5/db5_train_set.h5 --val_file datasets/db5/db5_val_set.h5 --test_file datasets/db5/db5_test_set.h5 --teacher_checkpoint pwave/db5.pth --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.2 --in_channels 8 --max_length 512 --patch_size 8 --batch_size 32 --accum_steps 1 --epochs 150 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --num_workers 1 --output_dir multilabel_db5_student_kd --scheduler cosine --teacher_logits_h5 pwave/db5_logits.h5 --sanity_teacher_test --student_dataset_profile db5 --hard_loss ce_softf1 --save_criterion f1_macro
+python -m torch.distributed.run --nproc_per_node=1 --master_port=28881 run_kd.py --train_file datasets/db5/db5_train_set.h5 --val_file datasets/db5/db5_val_set.h5 --test_file datasets/db5/db5_test_set.h5 --teacher_checkpoin pwave/db5.pth  --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.2 --in_channels 8 --max_length 512 --patch_size 8 --batch_size 32 --accum_steps 1 --epochs 150 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --num_workers 1 --output_dir multilabel_db5_student_kd --scheduler cosine --teacher_logits_h5 pwave/db5_logits.h5 --sanity_teacher_test --student_dataset_profile db5 --hard_loss ce_softf1 --save_criterion f1_macro
 ```
 
 ### UCI
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=29791 run_kd.py --train_file datasets/UCI_EMG_proc/uci_emg_train.h5 --val_file datasets/UCI_EMG_proc/uci_emg_val.h5 --test_file datasets/UCI_EMG_proc/uci_emg_test.h5 --teacher_checkpoint pwave/uci_pretrained.pth --in_channels 8 --epochs 50 --lr 2e-4 --weight_decay 1e-3 --threshold 0.3 --use_amp --output_dir multilabel_uci_student_replicated --batch_size 64 --accum_steps 1 --task_type classification --max_length 600 --patch_size 4 --alpha_kd 0.2 --student_arch physiowavenpu --student_dataset_profile uci --print_student_config
+python -m torch.distributed.run --nproc_per_node=1 --master_port=29791 run_kd.py --train_file datasets/UCI_EMG_proc/uci_emg_train.h5 --val_file datasets/UCI_EMG_proc/uci_emg_val.h5 --test_file datasets/UCI_EMG_proc/uci_emg_test.h5 --teacher_checkpoint pwave/uci.pth --task_type classification --in_channels 8 --epochs 50 --lr 2e-4 --weight_decay 1e-3 --threshold 0.3 --use_amp --output_dir multilabel_uci_student_replicated --batch_size 64 --accum_steps 1 --task_type classification --max_length 600 --patch_size 4 --alpha_kd 0.2 --student_arch physiowavenpu --student_dataset_profile uci --print_student_config
 ```
 
 ### EPN-612

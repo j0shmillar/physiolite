@@ -57,7 +57,6 @@ from .data import (
     collate_multilabel_with_tlogits,
     collate_singlelabel_with_tlogits,
     ecgfounder_preprocess_np,
-    make_balanced_sampler_singlelabel,
 )
 from .losses import kd_bce_with_logits, kd_ce
 from .schedulers import WarmupCosineSchedule
@@ -229,7 +228,8 @@ def parse_kernel_set(s: str) -> tuple[int, ...]:
 
 
 STUDENT_DATASET_PROFILES = {
-    "uci": {"patch_t": 4, "front_pool_k": 3, "post_patch_pool_t": 5, "student_pos_freqs": 8},
+    #"uci": {"patch_t": 4, "front_pool_k": 3, "post_patch_pool_t": 5, "student_pos_freqs": 8},
+    "uci": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
     "db5": {"patch_t": 8, "front_pool_k": 4, "post_patch_pool_t": 2, "student_pos_freqs": 8},
     "epn612": {"patch_t": 4, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
     "ptb": {"patch_t": 8, "front_pool_k": 4, "post_patch_pool_t": 4, "student_pos_freqs": 8},
@@ -349,7 +349,7 @@ class WarmupCosineSchedule(torch.optim.lr_scheduler.LambdaLR):
 @torch.no_grad()
 def build_teacher_for_kd(ckpt_path, kd_task_type, num_outputs_for_kd, rank=0):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    sd = ckpt.get('model_state_dict') or ckpt.get('state_dict') or ckpt
+    sd = _extract_checkpoint_state_dict(ckpt)
     targs = ckpt.get('args', {}) or {}
 
     in_channels       = int(targs.get('in_channels', 12))
@@ -555,7 +555,11 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
         rec_macro  = recall_score(y_true, y_pred, average='macro', zero_division=0)
         f1_micro   = f1_score(y_true, y_pred, average='micro', zero_division=0)
         f1_macro   = f1_score(y_true, y_pred, average='macro', zero_division=0)
-        f1_macro_no_rest = f1_score(y_true, y_pred, average="macro", labels=list(range(1, 53)), zero_division=0)
+        f1_macro_no_rest = None
+        if num_classes == 53:
+            f1_macro_no_rest = f1_score(
+                y_true, y_pred, average="macro", labels=list(range(1, 53)), zero_division=0
+            )
         f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
 
         try:
@@ -582,7 +586,8 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
             print(f"  Recall(micro/macro):    {rec_micro:.4f}/{rec_macro:.4f}")
             print(f"  F1(micro/macro):        {f1_micro:.4f}/{f1_macro:.4f}")
             print(f"  F1(weighted):           {f1_weighted:.4f}")
-            print(f"  F1(no rest, macro):     {f1_macro_no_rest:.4f}")
+            if f1_macro_no_rest is not None:
+                print(f"  F1(no rest, macro):     {f1_macro_no_rest:.4f}")
             print(f"  AUROC(micro/macro):     {auroc_micro:.4f}/{auroc_macro:.4f}")
             print(f"  AP(micro/macro):        {ap_micro:.4f}/{ap_macro:.4f}")
             print("  -- Multilabel-style on one-hot --")
@@ -595,6 +600,7 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
             recall_micro=rec_micro,     recall_macro=rec_macro,
             f1_micro=f1_micro,          f1_macro=f1_macro,
             f1_weighted=f1_weighted,
+            f1_macro_no_rest=f1_macro_no_rest,
             auroc_micro=auroc_micro,    auroc_macro=auroc_macro,
             ap_micro=ap_micro,          ap_macro=ap_macro,
             hamming_loss=ham,
@@ -797,6 +803,10 @@ def _extract_checkpoint_state_dict(ckpt_obj):
     return ckpt_obj.get("student_state_dict") or ckpt_obj.get("model_state_dict") or ckpt_obj.get("state_dict") or ckpt_obj
 
 
+def _extract_teacher_checkpoint_state_dict(ckpt_obj):
+    return ckpt_obj.get("model_state_dict") or ckpt_obj.get("state_dict") or ckpt_obj
+
+
 def build_teacher_model(args, train_ds, device, rank, kd_outputs):
     """
     Build teacher for online KD logits.
@@ -814,10 +824,14 @@ def build_teacher_model(args, train_ds, device, rank, kd_outputs):
         if rank == 0:
             print(f">> Resolved teacher profile: {teacher_profile}")
 
-        if teacher_profile == "db5":
+        teacher, head_loaded = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, kd_outputs, rank=rank)
+        teacher = teacher.to(device)
+        if teacher_profile == "db5" and not head_loaded:
+            if rank == 0:
+                print(">> Falling back to DB5 PhysioWave template because checkpoint head metadata is incomplete.")
             teacher, _ = load_physiowave()
             ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
-            sd = _extract_checkpoint_state_dict(ckpt)
+            sd = _extract_teacher_checkpoint_state_dict(ckpt)
             if isinstance(sd, dict) and any(k.startswith("module.") for k in sd.keys()):
                 sd = {k[7:] if k.startswith("module.") else k: v for k, v in sd.items()}
 
@@ -835,15 +849,12 @@ def build_teacher_model(args, train_ds, device, rank, kd_outputs):
             msg = teacher.load_state_dict(filtered_sd, strict=False)
             teacher = teacher.to(device)
             if rank == 0:
-                print(">> Loaded DB5 PhysioWave teacher checkpoint with DB5 config.")
+                print(">> Loaded DB5 PhysioWave teacher checkpoint with DB5 fallback config.")
                 print(
                     f"   matched={len(filtered_sd)} "
                     f"missing={len(msg.missing_keys)} unexpected={len(msg.unexpected_keys)} "
                     f"shape_mismatch={len(shape_mismatch)}"
                 )
-        else:
-            teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, kd_outputs, rank=rank)
-            teacher = teacher.to(device)
         patch_wavelet_modules_io(teacher, rank=rank)
     else:
         t_args = deepcopy(args)
@@ -979,35 +990,6 @@ class CEPlusSoftF1Macro(nn.Module):
         total = ce_loss + (self.lam * soft_f1_loss)
         return total
     
-def make_balanced_sampler_singlelabel(ds, num_classes: int, pow_: float = 1.0):
-    """
-    ds[i] -> (x, y) where y is int class (or one-hot)
-    Returns a WeightedRandomSampler over indices.
-    """
-    ys = []
-    for i in range(len(ds)):
-        _x, y = ds[i]
-        if isinstance(y, torch.Tensor) and y.ndim == 0:
-            yi = int(y.item())
-        elif isinstance(y, torch.Tensor) and y.ndim == 1 and y.numel() == num_classes:
-            yi = int(y.argmax().item())
-        else:
-            yi = int(y)
-        ys.append(yi)
-
-    ys = torch.tensor(ys, dtype=torch.long)
-    counts = torch.bincount(ys, minlength=num_classes).float().clamp_min(1.0)
-
-    class_w = 1.0 / (counts ** pow_)
-    sample_w = class_w[ys]
-
-    sampler = WeightedRandomSampler(
-        weights=sample_w,
-        num_samples=len(ds),   # draw len(ds) samples per epoch
-        replacement=True
-    )
-    return sampler, counts.cpu().numpy().astype(int).tolist()
-
 def load_physiowave():
     rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{rank}")
@@ -1141,20 +1123,7 @@ def main_worker(rank, world_size, args):
         print(f"Train/Val/Test: {len(train_ds)}/{len(val_ds)}/{len(test_ds) if test_ds else 0}")
         print(f"Num classes: {train_ds.num_classes}")
 
-    train_sampler = None
-    if args.balanced_sampler:
-        if args.task_type != "classification":
-            raise ValueError("--balanced_sampler only supports task_type=classification (single-label).")
-        if world_size > 1:
-            raise ValueError("--balanced_sampler not implemented for DDP > 1 in this script (needs per-rank sampling).")
-
-        sampler, cls_counts = make_balanced_sampler_singlelabel(train_ds, train_ds.num_classes, pow_=args.sampler_pow)
-        if rank == 0:
-            print(f">> Using balanced sampler: pow={args.sampler_pow}")
-            print(f">> Class counts: {cls_counts}")
-        train_sampler = sampler
-    else:
-        train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
+    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
 
     val_sampler   = DistributedSampler(val_ds,   num_replicas=world_size, rank=rank, shuffle=False)
     test_sampler  = DistributedSampler(test_ds,  num_replicas=world_size, rank=rank, shuffle=False) if test_ds else None
@@ -1558,7 +1527,6 @@ def main(argv=None):
         ],
         help="Teacher backbone used for KD logits. 'physiowave' uses the original BERTWavelet teacher loader.",
     )
-
     p.add_argument(
         "--student_dataset_profile",
         type=str,
@@ -1658,3 +1626,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

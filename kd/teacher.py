@@ -8,6 +8,10 @@ from models.physiowave import BERTWaveletTransformer
 from .common import patch_wavelet_modules_io
 
 
+def _extract_teacher_checkpoint_state_dict(ckpt_obj):
+    return ckpt_obj.get("model_state_dict") or ckpt_obj.get("state_dict") or ckpt_obj
+
+
 @torch.no_grad()
 def build_teacher_for_kd(ckpt_path, kd_task_type, num_outputs_for_kd, rank=0):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -180,9 +184,25 @@ def load_teacher_model_for_eval(args, device: torch.device, num_outputs: int, ra
             "kd.teacher.load_teacher_model_for_eval currently supports teacher_model='physiowave' only. "
             "Use run_kd.py for multi-backbone teacher selection during KD."
         )
-    teacher, _ = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, num_outputs, rank=rank)
+    teacher, head_loaded = build_teacher_for_kd(args.teacher_checkpoint, args.task_type, num_outputs, rank=rank)
+    teacher_profile = getattr(args, "teacher_dataset_profile", "none")
+    student_profile = getattr(args, "student_dataset_profile", "none")
+    if teacher_profile == "none":
+        teacher_profile = student_profile
+    if teacher_profile == "db5" and not head_loaded:
+        if rank == 0:
+            print(">> Falling back to DB5 PhysioWave template because checkpoint head metadata is incomplete.")
+        teacher, _ = load_physiowave()
+        ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
+        sd = _extract_teacher_checkpoint_state_dict(ckpt)
+        if isinstance(sd, dict) and any(k.startswith("module.") for k in sd.keys()):
+            sd = {k[7:] if k.startswith("module.") else k: v for k, v in sd.items()}
+        model_sd = teacher.state_dict()
+        filtered_sd = {k: v for k, v in sd.items() if k in model_sd and tuple(v.shape) == tuple(model_sd[k].shape)}
+        teacher.load_state_dict(filtered_sd, strict=False)
     teacher = teacher.to(device).eval()
     for p in teacher.parameters():
         p.requires_grad = False
     patch_wavelet_modules_io(teacher, rank=rank)
     return teacher, "bertwavelet"
+
