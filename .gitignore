@@ -12,10 +12,6 @@ __pycache__/
 *.ckpt
 *.safetensors
 
-# Dataset artifacts
-*.h5
-*.hdf5
-
 # Logs and outputs
 outputs/
 kd_output/
