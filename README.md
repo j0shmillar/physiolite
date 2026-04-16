@@ -175,7 +175,7 @@ python data_prep/ecg/chapman.py --root_dir datasets/chapman-shaoxing --out_dir d
 
 ## Example commands
 
-The commands below are provided as examples for evaluating PhysioLite on the datasets used in our experiments.Pre-trained weights for both PhysioLite / PhysioWave are [available](https://drive.google.com/drive/folders/1cAAv3PZZ7T3rk05I3XaEC9MorxqUO9KX?usp=sharing).
+The commands below are provided as examples for evaluating PhysioLite on the datasets used in our experiments. Pre-trained weights for both PhysioLite / PhysioWave are [available](https://drive.google.com/drive/folders/1cAAv3PZZ7T3rk05I3XaEC9MorxqUO9KX?usp=sharing).
 
 ### DB5
 
