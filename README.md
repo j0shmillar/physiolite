@@ -1,8 +1,16 @@
 # PhysioLite
 
-PhysioLite: a lightweight, NPU-compatible architecture and training framework for near-real-time ECG and EMG modeling.
+PhysioLite: a lightweight, NPU-friendly model and training framework for ECG/EMG analysis.
+
+## Acknowledgments
+
+PhysioLite is trained using [**PhysioWave**](https://github.com/ForeverBlue816/PhysioWave), a strong multi-scale wavelet-Transformer foundation model for physiological signal analysis. We gratefully acknowledge and thank the authors of PhysioWave.
+
+Pre-trained PhysioWave checkpoints used with this repository are linked below in the example section.
 
 ## Setup
+
+Create the environment and install dependencies:
 
 ```bash
 conda create -n physiolite python=3.11
@@ -13,11 +21,15 @@ pip install -r requirements.txt
 
 ## Entrypoint
 
+The main entrypoint for training and evaluation is:
+
 ```bash
 python -m torch.distributed.run --nproc_per_node=1 --master_port=<PORT> run_kd.py <ARGS>
 ```
 
 ## Data Setup
+
+This section covers dataset download and preprocessing for all ECG and EMG benchmarks used.
 
 ### EMG:
 
@@ -161,43 +173,42 @@ Preprocess with filtering:
 python data_prep/ecg/chapman.py --root_dir datasets/chapman-shaoxing --out_dir datasets/ChapmanShaoxing_filtered --enable_filtering
 ```
 
-## Some example commands
+## Example commands
 
-Below, we give some example commands to evaluate PhysioLite on the range of datasets used. 
+The commands below are provided as examples for evaluating PhysioLite on the datasets used in our experiments.Pre-trained weights for both PhysioLite / PhysioWave are [available](https://drive.google.com/drive/folders/1cAAv3PZZ7T3rk05I3XaEC9MorxqUO9KX?usp=sharing).
 
 ### DB5
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/db5/db5_train_set.h5 --val_file datasets/db5/db5_val_set.h5 --test_file datasets/db5/db5_test_set.h5 --teacher_checkpoin pwave/db5.pth  --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5  --in_channels 8 --max_length 512 --patch_size 8 --batch_size 32 --accum_steps 1 --epochs 150 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --output_dir out --scheduler cosine --teacher_logits_h5 pwave/db5_logits.h5 --student_dataset_profile db5 --hard_loss ce_softf1 --save_criterion f1_macro
+python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/db5/db5_train_set.h5 --val_file datasets/db5/db5_val_set.h5 --test_file datasets/db5/db5_test_set.h5 --teacher_checkpoint pwave/db5.pth  --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5  --in_channels 8 --max_length 512 --patch_size 8 --batch_size 32 --accum_steps 1 --epochs 150 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --output_dir out --scheduler cosine --teacher_logits_h5 pwave/db5_logits.h5 --student_dataset_profile db5 --hard_loss ce_softf1 --save_criterion f1_macro
 ```
 
 ### UCI
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/UCI/uci_emg_train.h5 --val_file datasets/UCI/uci_emg_val.h5 --test_file datasets/UCI/uci_emg_test.h5 --teacher_checkpoint pwave/uci.pth --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 8 --max_length 1024 --patch_size 4 --batch_size 64 --accum_steps 1  --epochs 50 --lr 2e-4 --weight_decay 1e-3 --threshold 0.3 --output_dir out --scheduler cosine --student_dataset_profile uci
+python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/UCI/uci_emg_train.h5 --val_file datasets/UCI/uci_emg_val.h5 --test_file datasets/UCI/uci_emg_test.h5 --teacher_checkpoint pwave/uci.pth --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 8 --max_length 1024 --patch_size 4 --batch_size 64 --accum_steps 1  --epochs 50 --lr 2e-4 --weight_decay 1e-3 --threshold 0.3 --output_dir out --scheduler cosine --student_dataset_profile uci --save_criterion loss
 ```
 
 ### EPN-612
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file ./datasets/EPN612/epn612_train_set.h5 --val_file ./datasets/EPN612/epn612_val_set.h5 --test_file ./datasets/EPN612/epn612_test_set.h5 --teacher_checkpoint pwave/epn612.pth --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 8 --max_length 1024 --patch_size 8 --batch_size 32 --accum_steps 1 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --output_dir out --student_dataset_profile none --teacher_logits_h5 pwave/epn612_logits.h5 --student_post_patch_pool_t 4 --student_front_pool_k 4
+python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file ./datasets/EPN612/epn612_train_set.h5 --val_file ./datasets/EPN612/epn612_val_set.h5 --test_file ./datasets/EPN612/epn612_test_set.h5 --teacher_checkpoint pwave/epn612.pth --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 8 --max_length 1024 --patch_size 8 --batch_size 32 --accum_steps 1 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --output_dir out --student_dataset_profile none --teacher_logits_h5 pwave/epn612_logits.h5 --student_post_patch_pool_t 4 --student_front_pool_k 4 --save_criterion loss
 ```
 
 ### PTB
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/physionet.org/files/ptb-xl/1.0.3/train.h5 --val_file datasets/physionet.org/files/ptb-xl/1.0.3/val.h5 --test_file datasets/physionet.org/files/ptb-xl/1.0.3/test.h5 --teacher_checkpoint pwave/ptb.pth --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 12 --max_length 2048 --patch_size 16 --batch_size 32 --accum_steps 1 --epochs 50   --lr 1e-3   --weight_decay 1e-3   --threshold 0.3 --output_dir out   
+python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/physionet.org/files/ptb-xl/1.0.3/train.h5 --val_file datasets/physionet.org/files/ptb-xl/1.0.3/val.h5 --test_file datasets/physionet.org/files/ptb-xl/1.0.3/test.h5 --teacher_checkpoint pwave/ptb.pth --task_type classification --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 12 --max_length 2048 --patch_size 16 --batch_size 32 --accum_steps 1 --epochs 50   --lr 1e-3   --weight_decay 1e-3   --threshold 0.3 --output_dir out --save_criterion loss
 ```
 
 ### CPSC
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/CPSC/cpsc_9class_train.h5 --val_file datasets/CPSC/cpsc_9class_val.h5 --test_file datasets/CPSC/cpsc_9class_test.h5 --teacher_checkpoint pwave/cpsc.pth --task_type multilabel --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 12 --max_length 2048 --patch_size 16 --batch_size 32 --accum_steps 1 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --output_dir out --student_dataset_profile cpsc --teacher_logits_h5 pwave/cpsc_logits.h5  --hard_loss bce
+python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/CPSC/cpsc_9class_train.h5 --val_file datasets/CPSC/cpsc_9class_val.h5 --test_file datasets/CPSC/cpsc_9class_test.h5 --teacher_checkpoint pwave/cpsc.pth --task_type multilabel --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 12 --max_length 2048 --patch_size 16 --batch_size 32 --accum_steps 1 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --output_dir out --student_dataset_profile cpsc --teacher_logits_h5 pwave/cpsc_logits.h5  --hard_loss bce --save_criterion loss
 ```
 
-### CHAPMAN
+### Chapman-Shaoxing
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/ChapmanShaoxing/train.h5 --val_file datasets/ChapmanShaoxing/val.h5 --test_file datasets/ChapmanShaoxing/test.h5 --teacher_checkpoint pwave/chapman.pth --task_type multilabel --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 12 --max_length 2048 --patch_size 16 --batch_size 32 --accum_steps 1 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --output_dir out --student_dataset_profile chapman --teacher_logits_h5 pwave/chapman_logits.h5   --hard_loss bce
+python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 run_kd.py --train_file datasets/ChapmanShaoxing/train.h5 --val_file datasets/ChapmanShaoxing/val.h5 --test_file datasets/ChapmanShaoxing/test.h5 --teacher_checkpoint pwave/chapman.pth --task_type multilabel --student_arch physiowavenpu --teacher_model physiowave --alpha_kd 0.5 --in_channels 12 --max_length 2048 --patch_size 16 --batch_size 32 --accum_steps 1 --epochs 50 --lr 1e-3 --weight_decay 1e-3 --threshold 0.3 --output_dir out --student_dataset_profile chapman --teacher_logits_h5 pwave/chapman_logits.h5   --hard_loss bce --save_criterion loss
 ```
-
