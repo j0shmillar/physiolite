@@ -85,9 +85,13 @@ class PreprocessWrapperDataset(torch.utils.data.Dataset):
         return getattr(self.base_ds, name)
 
     def __getitem__(self, idx):
-        x, y = self.base_ds[idx]
+        sample = self.base_ds[idx]
+        if not isinstance(sample, (tuple, list)) or len(sample) < 2:
+            raise ValueError("PreprocessWrapperDataset expects samples shaped like (x, y, ...).")
+
+        x, y, *rest = sample
         if self.mode == "none":
-            return x, y
+            return (x, y, *rest) if rest else (x, y)
 
         x_np = x.detach().cpu().numpy()
         x_np = ecgfounder_preprocess_np(
@@ -102,7 +106,7 @@ class PreprocessWrapperDataset(torch.utils.data.Dataset):
             do_zscore=self.args.pp_zscore,
         )
         x = torch.from_numpy(x_np).to(dtype=torch.float32)
-        return x, y
+        return (x, y, *rest) if rest else (x, y)
 
 
 class TeacherLogitsWrapperDataset(torch.utils.data.Dataset):

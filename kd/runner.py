@@ -20,8 +20,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, WeightedRandomSampler
 from tqdm import tqdm
 
-import h5py
-
 from torch.cuda.amp import GradScaler
 
 from sklearn.metrics import (
@@ -556,7 +554,7 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
         precision_micro=prec_micro, precision_macro=prec_macro,
         recall_micro=rec_micro,     recall_macro=rec_macro,
         f1_micro=f1_micro,          f1_macro=f1_macro,
-        f1_weighed=f1_weighted,
+        f1_weighted=f1_weighted,
         auroc_micro=auroc_micro,    auroc_macro=auroc_macro,
         ap_micro=ap_micro,          ap_macro=ap_macro,
         hamming_loss=ham,
@@ -793,44 +791,6 @@ def forward_model_logits(model, x, *, arch, args, pe_cache=None, pe_scale=0.1):
     return logits
 
 
-class TeacherLogitsWrapperDataset(torch.utils.data.Dataset):
-    """
-    Wraps an existing dataset so __getitem__ returns (x, y, t_logits),
-    where t_logits are read from an HDF5 dataset (default key 'teacher_logits').
-
-    IMPORTANT: Opens HDF5 lazily per-worker to avoid multiprocessing issues.
-    """
-    def __init__(self, base_ds, logits_h5_path: str, logits_key: str = "teacher_logits"):
-        self.base_ds = base_ds
-        self.logits_h5_path = logits_h5_path
-        self.logits_key = logits_key
-        self._h5 = None
-        self._dset = None
-
-        for attr in ("num_classes", "num_labels"):
-            if hasattr(base_ds, attr):
-                setattr(self, attr, getattr(base_ds, attr))
-
-    def __len__(self):
-        return len(self.base_ds)
-
-    def __getattr__(self, name):
-        if name in ("base_ds", "logits_h5_path", "logits_key", "_h5", "_dset"):
-            raise AttributeError(name)
-        return getattr(self.base_ds, name)
-
-    def _lazy_open(self):
-        if self._h5 is None:
-            self._h5 = h5py.File(self.logits_h5_path, "r")
-            self._dset = self._h5[self.logits_key]
-
-    def __getitem__(self, idx):
-        x, y = self.base_ds[idx]
-        self._lazy_open()
-        t = self._dset[idx]  # numpy array [C]
-        t = torch.from_numpy(t).to(dtype=torch.float16)
-        return x, y, t
-
 class CEPlusSoftF1Macro(nn.Module):
     """
     Single-label multiclass:
@@ -942,6 +902,7 @@ def load_physiowave(num_classes: int, in_channels: int = 8):
 def main_worker(rank, world_size, args):
     dist.init_process_group(backend="nccl", init_method="env://", rank=rank, world_size=world_size)
     device = torch.device(f"cuda:{rank}")
+    use_ddp = world_size > 1
 
     if rank == 0:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -1011,9 +972,6 @@ def main_worker(rank, world_size, args):
 
     train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
 
-    val_sampler   = DistributedSampler(val_ds,   num_replicas=world_size, rank=rank, shuffle=False)
-    test_sampler  = DistributedSampler(test_ds,  num_replicas=world_size, rank=rank, shuffle=False) if test_ds else None
-
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -1025,10 +983,30 @@ def main_worker(rank, world_size, args):
         prefetch_factor=4 if args.num_workers > 0 else None,
         persistent_workers=(args.num_workers > 0)
     )
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, sampler=val_sampler,
-                              collate_fn=base_collate_fn, num_workers=args.num_workers, pin_memory=True)
-    test_loader  = DataLoader(test_ds,  batch_size=args.batch_size, sampler=test_sampler,
-                              collate_fn=base_collate_fn, num_workers=args.num_workers, pin_memory=True) if test_ds else None
+    val_loader = None
+    test_loader = None
+    if rank == 0:
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=base_collate_fn,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            prefetch_factor=4 if args.num_workers > 0 else None,
+            persistent_workers=(args.num_workers > 0),
+        )
+        if test_ds is not None:
+            test_loader = DataLoader(
+                test_ds,
+                batch_size=args.batch_size,
+                shuffle=False,
+                collate_fn=base_collate_fn,
+                num_workers=args.num_workers,
+                pin_memory=True,
+                prefetch_factor=4 if args.num_workers > 0 else None,
+                persistent_workers=(args.num_workers > 0),
+            )
     
     if rank == 0:
         item0 = train_ds[0]
@@ -1079,7 +1057,6 @@ def main_worker(rank, world_size, args):
         total_params = sum(p.numel() for p in student.parameters())
         print(f"Student params: {total_params/1e6:.2f}M")
     
-    use_ddp = world_size > 1
     if use_ddp:
         student = DDP(student, device_ids=[rank])
 
@@ -1146,6 +1123,8 @@ def main_worker(rank, world_size, args):
         del teacher_model
         torch.cuda.empty_cache()
         print("===> SANITY: Teacher test eval done <===\n")
+    if use_ddp:
+        dist.barrier()
 
     for epoch in range(args.epochs):
         train_sampler.set_epoch(epoch)
@@ -1268,50 +1247,57 @@ def main_worker(rank, world_size, args):
         if rank == 0:
             pbar.close()
 
-        val_metrics = eval_unified(
-            epoch, rank, student, val_loader, device, hard_criterion,
-            threshold=args.threshold, desc_prefix="Val",
-            task_type=args.task_type, pe_cache=pe_cache,
-            student_arch=args.student_arch, pe_scale=args.student_pe_scale,
-            amp_enabled=amp_enabled, amp_dtype=amp_dtype,
-        )
-        val_metric, higher_is_better = get_save_metric(val_metrics, args.save_criterion)
-        should_save = False
-        if best_metric is None:
-            should_save = True
-        elif higher_is_better:
-            should_save = val_metric > best_metric
-        else:
-            should_save = val_metric < best_metric
+        if use_ddp:
+            dist.barrier()
 
-        if rank == 0 and should_save:
-            best_metric = val_metric
-            save_path = os.path.join(args.output_dir, "best_student.pth")
-
-            base_student = unwrap_ddp(student)
-
-            torch.save({
-                "epoch": epoch,
-                "student_state_dict": base_student.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
-                "val_metrics": val_metrics,
-                "save_criterion": args.save_criterion,
-                "save_metric_value": val_metric,
-                "args": vars(args),
-            }, save_path)
-
-            print(
-                f"Saved best student @ epoch {epoch} -> {save_path} "
-                f"({args.save_criterion}={val_metric:.4f})"
+        if rank == 0:
+            val_metrics = eval_unified(
+                epoch, rank, unwrap_ddp(student), val_loader, device, hard_criterion,
+                threshold=args.threshold, desc_prefix="Val",
+                task_type=args.task_type, pe_cache=pe_cache,
+                student_arch=args.student_arch, pe_scale=args.student_pe_scale,
+                amp_enabled=amp_enabled, amp_dtype=amp_dtype,
             )
+            val_metric, higher_is_better = get_save_metric(val_metrics, args.save_criterion)
+            should_save = False
+            if best_metric is None:
+                should_save = True
+            elif higher_is_better:
+                should_save = val_metric > best_metric
+            else:
+                should_save = val_metric < best_metric
+
+            if should_save:
+                best_metric = val_metric
+                save_path = os.path.join(args.output_dir, "best_student.pth")
+
+                base_student = unwrap_ddp(student)
+
+                torch.save({
+                    "epoch": epoch,
+                    "student_state_dict": base_student.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+                    "val_metrics": val_metrics,
+                    "save_criterion": args.save_criterion,
+                    "save_metric_value": val_metric,
+                    "args": vars(args),
+                }, save_path)
+
+                print(
+                    f"Saved best student @ epoch {epoch} -> {save_path} "
+                    f"({args.save_criterion}={val_metric:.4f})"
+                )
+
+        if use_ddp:
+            dist.barrier()
 
     if rank == 0 and test_loader is not None:
         print("\n===> Testing best student <===")
         ckpt = torch.load(os.path.join(args.output_dir, "best_student.pth"), map_location="cpu", weights_only=False)
         unwrap_ddp(student).load_state_dict(ckpt["student_state_dict"])
         test_metrics = eval_unified(
-            "Test", rank, student, test_loader, device, hard_criterion,
+            "Test", rank, unwrap_ddp(student), test_loader, device, hard_criterion,
             threshold=args.threshold, desc_prefix="Test",
             task_type=args.task_type, pe_cache=pe_cache,
             student_arch=args.student_arch, pe_scale=args.student_pe_scale,
@@ -1320,6 +1306,8 @@ def main_worker(rank, world_size, args):
         with open(os.path.join(args.output_dir, "test_results_kd.json"), "w") as f:
             json.dump(test_metrics, f, indent=4)
 
+    if use_ddp:
+        dist.barrier()
     dist.destroy_process_group()
 
 def _load_config_defaults(config_path: str) -> dict:
@@ -1516,5 +1504,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-
-

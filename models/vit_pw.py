@@ -238,7 +238,6 @@ class PhysioWaveNPU(nn.Module):
                 "patch_t > 16 is not supported on MAX78000. Choose patch_t in [1..16] and, if needed, set post_patch_pool_t to further downsample."
             )
         
-        legacy_bank_front_pool_bug = True
         if legacy_bank_front_pool_bug:
             # Reproduce historical behavior from older scripts where front_pool_k
             # was not forwarded into LearnableWaveletBank (bank defaulted to 3).
@@ -319,4 +318,3 @@ def ai85_vitpw(**kw):
 
 
 models = [{"name": "ai85_vitpw", "min_input": 1, "dim": 1}]
-
