@@ -17,6 +17,6 @@
   "patch_size": 4,
   "alpha_kd": 0.2,
   "student_dataset_profile": "uci",
-  "student_arch": "physiowavenpu",
+  "student_arch": "physiolite",
   "teacher_model": "physiowave"
 }

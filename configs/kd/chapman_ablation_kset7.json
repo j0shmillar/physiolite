@@ -17,7 +17,7 @@
   "num_workers": 1,
   "student_dataset_profile": "chapman",
   "student_kernel_set": "7",
-  "student_arch": "physiowavenpu",
+  "student_arch": "physiolite",
   "pp_mode": "none",
   "pp_apply_to": "none",
   "teacher_logits_h5": "chapman_logits.h5",

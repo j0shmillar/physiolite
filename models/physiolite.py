@@ -41,7 +41,7 @@ class FrontDownsample1D(nn.Module):
         return self.pool(x)
 
 
-class LearnableWaveletBank(nn.Module):
+class Bank(nn.Module):
     def __init__(self, in_ch: int, bank_ch: int = 12, kernel_set=(3, 5, 7), front_pool_k=3):
         super().__init__()
         if front_pool_k is not None:
@@ -56,11 +56,11 @@ class LearnableWaveletBank(nn.Module):
         for k in kernel_set:
             if k == 3:
                 if in_ch > 64:
-                    raise AssertionError("LearnableWaveletBank: padding>0 with in_ch>64 is not allowed on ai8x")
+                    raise AssertionError("Bank: padding>0 with in_ch>64 is not allowed on ai8x")
                 branches.append(nn.Conv1d(in_ch, bank_ch, kernel_size=3, padding=1, bias=False))
             elif k == 5:
                 if in_ch > 64:
-                    raise AssertionError("LearnableWaveletBank: padding>0 with in_ch>64 is not allowed on ai8x")
+                    raise AssertionError("Bank: padding>0 with in_ch>64 is not allowed on ai8x")
                 branches.append(nn.Conv1d(in_ch, bank_ch, kernel_size=5, padding=2, bias=False))
             elif k == 7:
                 branches.append(Conv1dRF7(in_ch, bank_ch))
@@ -141,8 +141,6 @@ class BottleneckReduce1D(nn.Module):
 
 
 class PoolThenPointwise1D(nn.Module):
-    """Fused second-stage downsample in 1D (kept for compatibility)."""
-
     def __init__(self, in_ch: int, out_ch: int, k: int):
         super().__init__()
         assert 1 <= k <= 16, f"pool kernel k={k} must be in [1..16] on MAX78000"
@@ -192,7 +190,7 @@ class ConvHead2D(nn.Module):
         return x.squeeze(-1).squeeze(-1)
 
 
-class PhysioWaveNPU(nn.Module):
+class PhysioLite(nn.Module):
     """
     Input: [B, C_raw + 2*pos_freqs, T] (PosEnc concatenated outside model).
 
@@ -240,14 +238,14 @@ class PhysioWaveNPU(nn.Module):
         
         if legacy_bank_front_pool_bug:
             # Reproduce historical behavior from older scripts where front_pool_k
-            # was not forwarded into LearnableWaveletBank (bank defaulted to 3).
-            self.bank = LearnableWaveletBank(
+            # was not forwarded into Bank (bank defaulted to 3).
+            self.bank = Bank(
                 in_channels,
                 bank_ch=bank_ch,
                 kernel_set=kernel_set,
             )
         else:
-            self.bank = LearnableWaveletBank(
+            self.bank = Bank(
                 in_channels,
                 bank_ch=bank_ch,
                 kernel_set=kernel_set,
@@ -296,10 +294,10 @@ class PhysioWaveNPU(nn.Module):
 
 
 # -------- factory --------
-def ai85_vitpw(**kw):
+def ai85_physiolite(**kw):
     c_raw = kw.get("in_channels", 8)
     pos_freqs = kw.get("pos_freqs", 8)
-    return PhysioWaveNPU(
+    return PhysioLite(
         input_length=kw.get("input_length", 600),
         in_channels=c_raw + 2 * pos_freqs,
         num_classes=kw.get("num_classes", 6),
@@ -317,4 +315,4 @@ def ai85_vitpw(**kw):
     )
 
 
-models = [{"name": "ai85_vitpw", "min_input": 1, "dim": 1}]
+models = [{"name": "ai85_physiolite", "min_input": 1, "dim": 1}]

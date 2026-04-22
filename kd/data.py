@@ -9,21 +9,21 @@ from torch.utils.data import WeightedRandomSampler
 from timeseries_ds import collate_multilabel_fn, collate_singlelabel_fn
 
 
-def collate_singlelabel_with_tlogits(batch):
+def collate_singlelabel_with_teacher_logits(batch):
     xs = [(x, y) for (x, y, _t) in batch]
     x, y = collate_singlelabel_fn(xs)
     t = torch.stack([_t for (_x, _y, _t) in batch], dim=0)
     return x, y, t
 
 
-def collate_multilabel_with_tlogits(batch):
+def collate_multilabel_with_teacher_logits(batch):
     xs = [(x, y) for (x, y, _t) in batch]
     x, y = collate_multilabel_fn(xs)
     t = torch.stack([_t for (_x, _y, _t) in batch], dim=0)
     return x, y, t
 
 
-def ecgfounder_preprocess_np(
+def preprocess_ecgfounder_signal(
     x_ct: np.ndarray,
     *,
     fs: float,
@@ -64,7 +64,7 @@ def ecgfounder_preprocess_np(
     return y
 
 
-class PreprocessWrapperDataset(torch.utils.data.Dataset):
+class SignalPreprocessingDataset(torch.utils.data.Dataset):
     def __init__(self, base_ds, *, mode: str, fs: float, args):
         self.base_ds = base_ds
         self.mode = mode
@@ -87,14 +87,14 @@ class PreprocessWrapperDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         sample = self.base_ds[idx]
         if not isinstance(sample, (tuple, list)) or len(sample) < 2:
-            raise ValueError("PreprocessWrapperDataset expects samples shaped like (x, y, ...).")
+            raise ValueError("SignalPreprocessingDataset expects samples shaped like (x, y, ...).")
 
         x, y, *rest = sample
         if self.mode == "none":
             return (x, y, *rest) if rest else (x, y)
 
         x_np = x.detach().cpu().numpy()
-        x_np = ecgfounder_preprocess_np(
+        x_np = preprocess_ecgfounder_signal(
             x_np,
             fs=self.fs,
             notch_freq=self.args.pp_notch_freq,
@@ -109,7 +109,7 @@ class PreprocessWrapperDataset(torch.utils.data.Dataset):
         return (x, y, *rest) if rest else (x, y)
 
 
-class TeacherLogitsWrapperDataset(torch.utils.data.Dataset):
+class CachedTeacherLogitsDataset(torch.utils.data.Dataset):
     def __init__(self, base_ds, h5_path: str, key: str = "teacher_logits"):
         self.base_ds = base_ds
         self.h5_path = h5_path
@@ -150,7 +150,7 @@ class TeacherLogitsWrapperDataset(torch.utils.data.Dataset):
         return x, y, t
 
 
-def make_balanced_sampler_singlelabel(ds, num_classes: int, pow_: float = 1.0):
+def make_singlelabel_balanced_sampler(ds, num_classes: int, pow_: float = 1.0):
     y = ds._labels
     if isinstance(y, torch.Tensor):
         y = y.detach().cpu().numpy()

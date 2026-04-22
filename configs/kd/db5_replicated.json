@@ -5,7 +5,7 @@
   "teacher_checkpoint": "multilabel_db5_student_physiowave_new_tiny_1/best_student.pth",
   "task_type": "classification",
   "student_dataset_profile": "db5",
-  "student_arch": "physiowavenpu",
+  "student_arch": "physiolite",
   "alpha_kd": 0.2,
   "in_channels": 8,
   "max_length": 512,

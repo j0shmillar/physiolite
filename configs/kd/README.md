@@ -1,7 +1,7 @@
 # KD Experiment Configs
 
 These JSON files encode reproducible `run_kd.py` runs.
-For PhysioWaveNPU runs, each config sets `student_dataset_profile` to apply the expected
+For PhysioLite runs, each config sets `student_dataset_profile` to apply the expected
 `patch_t/front_pool_k/post_patch_pool_t/student_pos_freqs` combination per dataset.
 Teacher selection is controlled by `teacher_model` and `teacher_checkpoint`.
 CLI flags can also override `hard_loss`, `save_criterion`, and `deterministic`.

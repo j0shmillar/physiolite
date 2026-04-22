@@ -4,7 +4,7 @@
   "test_file": "smoke_assets/smoke_test.h5",
   "teacher_checkpoint": "smoke_assets/smoke_teacher.pth",
   "task_type": "classification",
-  "student_arch": "physiowavenpu",
+  "student_arch": "physiolite",
   "alpha_kd": 0.2,
   "in_channels": 8,
   "max_length": 128,

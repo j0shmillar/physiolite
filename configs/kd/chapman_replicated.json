@@ -17,7 +17,7 @@
   "alpha_kd": 0.2,
   "num_workers": 1,
   "student_dataset_profile": "chapman",
-  "student_arch": "physiowavenpu",
+  "student_arch": "physiolite",
   "task_type": "classification",
   "teacher_model": "physiowave"
 }

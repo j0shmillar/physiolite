@@ -1,23 +1,22 @@
-import os, sys
+import argparse
+import json
+import math
+import os
+import sys
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import math
-import argparse
-import random
-import json
-import importlib.util
 from copy import deepcopy
 from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.distributed as dist
+import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler, WeightedRandomSampler
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from torch.cuda.amp import GradScaler
@@ -29,123 +28,43 @@ from sklearn.metrics import (
     hamming_loss, jaccard_score)
 
 from models.physiowave import BERTWaveletTransformer
-from models.vit_pw import PhysioWaveNPU
+from models.physiolite import PhysioLite
 from timeseries_ds import (
-    SingleLabelTimeSeriesDataset,
     MultiLabelTimeSeriesDataset,
+    SingleLabelTimeSeriesDataset,
     collate_multilabel_fn,
+    collate_singlelabel_fn,
     parse_file_paths,
-    collate_singlelabel_fn)
+)
 
 from .common import (
-    autocast_ctx,
-    fp32,
-    load_repo_module,
-    make_posenc_1d_concat,
-    make_student_input,
+    cuda_autocast_context,
+    to_float32,
+    make_1d_sincos_positional_channels,
+    prepare_model_input,
     parse_kernel_set,
-    patch_wavelet_modules_io,
-    set_random_seed,
-    unwrap_ddp,
-    zscore_per_sample_channel,
+    align_wavelet_module_inputs,
+    seed_everything,
+    unwrap_distributed_model,
+    zscore_each_sample_channel,
 )
 from .data import (
-    PreprocessWrapperDataset,
-    TeacherLogitsWrapperDataset,
-    collate_multilabel_with_tlogits,
-    collate_singlelabel_with_tlogits,
-    ecgfounder_preprocess_np,
+    SignalPreprocessingDataset,
+    CachedTeacherLogitsDataset,
+    collate_multilabel_with_teacher_logits,
+    collate_singlelabel_with_teacher_logits,
 )
-from .losses import kd_bce_with_logits, kd_ce
+from .losses import (
+    CrossEntropyWithSoftMacroF1Loss,
+    distillation_bce_loss,
+    distillation_kl_loss,
+)
 from .schedulers import WarmupCosineSchedule
-from .teacher import build_teacher_for_kd, load_physiowave
-
-try:
-    from scipy.signal import iirnotch, butter, filtfilt
-    from scipy.signal import medfilt
-    _HAS_SCIPY = True
-except Exception:
-    _HAS_SCIPY = False
-
-
-
-def fp32(x: torch.Tensor) -> torch.Tensor:
-    return x.float() if isinstance(x, torch.Tensor) and x.dtype != torch.float32 else x
-
-def autocast_ctx(*, enabled: bool, dtype: torch.dtype):
-    """
-    Torch AMP compatibility:
-      - PyTorch >= 2.0: torch.amp.autocast(device_type="cuda", dtype=...)
-      - Older: torch.cuda.amp.autocast(dtype=...)
-    """
-    if not enabled:
-        return nullcontext()
-    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
-        return torch.amp.autocast(device_type="cuda", dtype=dtype)
-    return torch.cuda.amp.autocast(dtype=dtype)
-
-def collate_singlelabel_with_tlogits(batch):
-    xs = [(x, y) for (x, y, _t) in batch]
-    x, y = collate_singlelabel_fn(xs)
-    t = torch.stack([_t for (_x, _y, _t) in batch], dim=0)  # [B,C]
-    return x, y, t
-
-def patch_wavelet_modules_io(model: nn.Module, *, rank: int = 0) -> dict:
-    """
-    Runtime patch (no model edits):
-    For wavelet_decomp submodules, registers forward_pre_hooks on Conv1d + Linear
-    to ensure input tensor is moved to the module's device and cast to module's dtype.
-
-    Returns counts of hooked modules.
-    """
-    counts = {"conv1d": 0, "linear": 0}
-
-    def _pre_hook(mod, inputs):
-        if not inputs:
-            return
-        x = inputs[0]
-        if not torch.is_tensor(x):
-            return
-        p = next(mod.parameters(), None)
-        if p is None:
-            return
-        dev = p.device
-        dt = p.dtype
-        if x.device != dev:
-            x = x.to(dev, non_blocking=True)
-        if x.dtype != dt:
-            x = x.to(dt)
-        return (x,) + tuple(inputs[1:])
-
-    for name, m in model.named_modules():
-        if "wavelet_decomp" not in name:
-            continue
-        if isinstance(m, nn.Conv1d):
-            m.register_forward_pre_hook(_pre_hook)
-            counts["conv1d"] += 1
-        elif isinstance(m, nn.Linear):
-            m.register_forward_pre_hook(_pre_hook)
-            counts["linear"] += 1
-
-    if rank == 0:
-        print(f">> Patched wavelet IO: hooked Conv1d={counts['conv1d']} Linear={counts['linear']}")
-    return counts
-
-def collate_multilabel_with_tlogits(batch):
-    xs = [(x, y) for (x, y, _t) in batch]
-    x, y = collate_multilabel_fn(xs)
-    t = torch.stack([_t for (_x, _y, _t) in batch], dim=0)  # [B,C]
-    return x, y, t
-
-def set_random_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+from .teacher import build_teacher_for_kd, load_physiowave as load_db5_physiowave_teacher
 
 
 def configure_reproducibility(seed: int, deterministic: bool = False):
-    set_random_seed(seed)
+    seed_everything(seed)
     if deterministic:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.backends.cudnn.deterministic = True
@@ -165,7 +84,7 @@ def build_hard_criterion(args, train_ds, device):
     if args.hard_loss == "ce":
         return nn.CrossEntropyLoss().to(device)
     if args.hard_loss == "ce_softf1":
-        return CEPlusSoftF1Macro(
+        return CrossEntropyWithSoftMacroF1Loss(
             num_classes=train_ds.num_classes,
             lam=float(args.softf1_lambda),
         ).to(device)
@@ -182,47 +101,6 @@ def get_save_metric(metrics: dict[str, Any], criterion_name: str) -> tuple[float
     if criterion_name == "accuracy":
         return float(metrics["accuracy"]), True
     raise ValueError(f"Unsupported save criterion: {criterion_name}")
-
-@torch.no_grad()
-def make_posenc_1d_concat(num_freq: int, T: int, device, dtype=torch.float32):
-    """
-    Returns:
-      - None if num_freq <= 0 (i.e., PosEnc disabled)
-      - Tensor [2F, T] otherwise
-    """
-    num_freq = int(num_freq)
-    if num_freq <= 0:
-        return None
-
-    ts = torch.linspace(0, 1, steps=T, device=device, dtype=dtype)
-    chans = []
-    for k in range(num_freq):
-        f = 2.0 ** k
-        s = torch.sin(2.0 * math.pi * f * ts)
-        c = torch.cos(2.0 * math.pi * f * ts)
-        chans.extend([s, c])
-    return torch.stack(chans, dim=0)  # [2F, T]
-
-def parse_kernel_set(s: str) -> tuple[int, ...]:
-    """
-    Examples:
-      "3,5,7" -> (3,5,7)
-      "7"     -> (7,)
-      "3"     -> (3,)
-    """
-    if s is None:
-        return (3, 5, 7)
-    s = str(s).strip()
-    if not s:
-        return (3, 5, 7)
-    parts = [p.strip() for p in s.split(",") if p.strip()]
-    ks = tuple(int(p) for p in parts)
-    if len(ks) == 0:
-        raise ValueError("Empty --student_kernel_set. Use e.g. '3,5,7' or '7'.")
-    for k in ks:
-        if k <= 0 or (k % 2 == 0):
-            raise ValueError(f"Invalid kernel size {k} in --student_kernel_set (must be positive odd).")
-    return ks
 
 
 STUDENT_DATASET_PROFILES = {
@@ -280,86 +158,10 @@ def apply_student_dataset_profile(args, rank: int):
             f"student_pos_freqs={args.student_pos_freqs}"
         )
 
-def unwrap_ddp(m):
-    return m.module if hasattr(m, "module") else m
-
-def zscore_per_sample_channel(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """
-    x: [B, V, T]
-    z-score over time for each (B,V) channel separately.
-    """
-    mu = x.mean(dim=-1, keepdim=True)
-    std = x.std(dim=-1, keepdim=True).clamp_min(eps)
-    return (x - mu) / std
-
-def load_repo_module(repo_root: str, module_relpath: str, module_name: str):
-    module_path = os.path.join(repo_root, module_relpath)
-    if not os.path.isfile(module_path):
-        raise FileNotFoundError(f"Module not found: {module_path}")
-
-    repo_root = os.path.abspath(repo_root)
-    try:
-        sys.path.insert(0, repo_root)
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(mod)
-        return mod
-    finally:
-        if sys.path and sys.path[0] == repo_root:
-            sys.path.pop(0)
-
-def make_student_input(
-    x: torch.Tensor,
-    *,
-    arch: str,
-    pe_cache: torch.Tensor | None,
-    pe_scale: float,
-):
-    if arch == "physiowavenpu":
-        if pe_cache is None:
-            return x
-        pe = pe_cache.unsqueeze(0).expand(x.size(0), -1, -1)  # [B, 2F, T]
-        pe = pe_scale * pe
-        return torch.cat([x, pe], dim=1)  # [B, V+2F, T]
-    elif arch == "physiowave":
-        patch_t = 64  # must match the model's patch_size[1]
-        T = x.size(-1)
-        pad_t = (patch_t - (T % patch_t)) % patch_t
-        if pad_t:
-            x = F.pad(x, (0, pad_t))
-        return x
-    raise ValueError(f"Unknown student arch: {arch}")
-
-class WarmupCosineSchedule(torch.optim.lr_scheduler.LambdaLR):
-    def __init__(self, optimizer, warmup_steps, total_steps, last_epoch=-1):
-        self.warmup_steps = max(1, int(warmup_steps))
-        self.total_steps = max(self.warmup_steps + 1, int(total_steps))
-        super().__init__(optimizer, self.lr_lambda, last_epoch)
-
-    def lr_lambda(self, step):
-        if step < self.warmup_steps:
-            return float(step) / float(self.warmup_steps)
-        progress = float(step - self.warmup_steps) / float(max(1, self.total_steps - self.warmup_steps))
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
-
-def kd_ce(student_logits, teacher_logits, T=1.0):
-    s = F.log_softmax(student_logits / T, dim=1)
-    t = F.softmax(teacher_logits / T, dim=1)
-    return F.kl_div(s, t, reduction='batchmean') * (T * T)
-
-def kd_bce_with_logits(student_logits, teacher_logits, T=1.0):
-    if T <= 0:
-        T = 1.0
-    with torch.no_grad():
-        soft_targets = torch.sigmoid(teacher_logits / T)
-    return F.binary_cross_entropy_with_logits(student_logits / T, soft_targets, reduction='mean') * (T * T)
-
-
 @torch.no_grad()
 def eval_unified(epoch, rank, model, loader, device, criterion,
                  threshold=0.5, desc_prefix="Val", task_type=None,
-                 pe_cache=None, student_arch="physiowavenpu", pe_scale=0.1, amp_enabled=False, amp_dtype=torch.float16):
+                 pe_cache=None, student_arch="physiolite", pe_scale=0.1, amp_enabled=False, amp_dtype=torch.float16):
 
     model.eval()
     total_loss, total_samples = 0.0, 0
@@ -373,10 +175,10 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
         y = y.to(device, non_blocking=True)
 
         if student_arch in ("ecgfm","ecgfounder","clef","hubertecg","fcn", "bilstm", "ai85tcn1d"):
-            x = zscore_per_sample_channel(x)
+            x = zscore_each_sample_channel(x)
 
-        with autocast_ctx(enabled=(amp_enabled and device.type == "cuda"), dtype=amp_dtype):
-            x_in = make_student_input(x, arch=student_arch, pe_cache=pe_cache, pe_scale=pe_scale)
+        with cuda_autocast_context(enabled=(amp_enabled and device.type == "cuda"), dtype=amp_dtype):
+            x_in = prepare_model_input(x, arch=student_arch, pe_cache=pe_cache, pe_scale=pe_scale)
 
             if student_arch == "physiowave":
                 pw_task = "multilabel" if task_type == "multilabel" else "classification"
@@ -401,7 +203,7 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
         elif logits.dim() == 4:
             logits = logits.flatten(2).mean(-1)
 
-        logits_f = fp32(logits)
+        logits_f = to_float32(logits)
         if task_type == "multilabel":
             loss = criterion(logits_f, y.float())
         else:
@@ -562,90 +364,10 @@ def eval_unified(epoch, rank, model, loader, device, criterion,
     ))
     return metrics
 
-class FrozenBackboneWithHead(nn.Module):
-    """
-    Wrap an arbitrary backbone that returns either:
-      - logits [B,C]
-      - embeddings [B,D]
-      - dict/tuple with hidden states / features
-    and attach a trainable linear head.
-    """
-    def __init__(self, backbone: nn.Module, num_classes: int, *, rank: int = 0):
-        super().__init__()
-        self.backbone = backbone
-        self.num_classes = int(num_classes)
-        self.head = None  # lazily created after we see D
-        self._feat_dim = None
-        if rank == 0:
-            print(f">> FM wrapper: backbone={type(backbone)} num_classes={self.num_classes}")
-
-    @staticmethod
-    def _to_feat_tensor(out: Any) -> torch.Tensor:
-        if isinstance(out, dict):
-            for k in ("last_hidden_state", "encoder_out", "extract_features", "features", "embeddings", "embedding", "hidden_states", "repr", "representations"):
-                if k in out and isinstance(out[k], torch.Tensor):
-                    return out[k]
-        for attr in ("features", "feats", "embeddings", "embedding", "last_hidden_state", "hidden_states"):
-            if hasattr(out, attr):
-                v = getattr(out, attr)
-                if isinstance(v, torch.Tensor):
-                    return v
-        if isinstance(out, (tuple, list)):
-            for v in out:
-                if isinstance(v, torch.Tensor):
-                    return v
-                if isinstance(v, dict):
-                    try:
-                        return FrozenBackboneWithHead._to_feat_tensor(v)
-                    except Exception:
-                        pass
-        if isinstance(out, torch.Tensor):
-            return out
-        raise RuntimeError(f"Could not extract tensor features from output type={type(out)}")
-
-    @staticmethod
-    def _pool_to_bxd(t: torch.Tensor) -> torch.Tensor:
-        if t.dim() == 2:
-            return t
-
-        if t.dim() == 3:
-            B, A, C = t.shape
-            if C >= A:
-                return t.mean(dim=1)  # [B, D]
-            else:
-                return t.mean(dim=2)  # [B, D]
-
-        if t.dim() == 4:
-            B = t.size(0)
-            t = t.view(B, -1, t.size(-1))
-            return t.mean(dim=1)
-
-        B = t.size(0)
-        t = t.view(B, -1)
-        return t
-
-    def _ensure_head(self, feat_bxd: torch.Tensor):
-        if self.head is not None:
-            return
-        if feat_bxd.dim() != 2:
-            raise RuntimeError(f"Expected pooled feat [B,D], got {tuple(feat_bxd.shape)}")
-        D = int(feat_bxd.size(1))
-        self._feat_dim = D
-        self.head = nn.Linear(D, self.num_classes).to(feat_bxd.device)
-
-    def forward(self, x):
-        with torch.no_grad():
-            out = self.backbone(x)
-            feat = self._to_feat_tensor(out)
-            feat = self._pool_to_bxd(feat)
-
-        self._ensure_head(feat)
-        return self.head(feat)
-
 def build_student(args, train_ds, device, rank):
     pe_cache = None
 
-    if args.student_arch == "physiowavenpu":
+    if args.student_arch == "physiolite":
         apply_student_dataset_profile(args, rank)
 
         depth = int(args.student_depth)  # allow 0,1,3
@@ -672,7 +394,7 @@ def build_student(args, train_ds, device, rank):
             print(f"   student_depth={args.student_depth}")
             print(f"   student_reduce={args.student_reduce}")
 
-        student = PhysioWaveNPU(
+        student = PhysioLite(
             input_length=args.max_length,
             in_channels=C_total,
             num_classes=train_ds.num_classes,
@@ -688,7 +410,7 @@ def build_student(args, train_ds, device, rank):
             post_patch_pool_t=args.student_post_patch_pool_t,
         ).to(device)
 
-        pe_cache = make_posenc_1d_concat(pos_freqs, args.max_length, device=device)
+        pe_cache = make_1d_sincos_positional_channels(pos_freqs, args.max_length, device=device)
         return student, pe_cache
 
     raise ValueError(f"Unknown student_arch: {args.student_arch}")
@@ -724,7 +446,7 @@ def build_teacher_model(args, train_ds, device, rank, kd_outputs):
         if teacher_profile == "db5" and not head_loaded:
             if rank == 0:
                 print(">> Falling back to DB5 PhysioWave template because checkpoint head metadata is incomplete.")
-            teacher, _ = load_physiowave()
+            teacher, _ = load_db5_physiowave_teacher()
             ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
             sd = _extract_teacher_checkpoint_state_dict(ckpt)
             if isinstance(sd, dict) and any(k.startswith("module.") for k in sd.keys()):
@@ -750,7 +472,7 @@ def build_teacher_model(args, train_ds, device, rank, kd_outputs):
                     f"missing={len(msg.missing_keys)} unexpected={len(msg.unexpected_keys)} "
                     f"shape_mismatch={len(shape_mismatch)}"
                 )
-        patch_wavelet_modules_io(teacher, rank=rank)
+        align_wavelet_module_inputs(teacher, rank=rank)
     else:
         t_args = deepcopy(args)
         t_args.student_arch = args.teacher_model
@@ -760,7 +482,7 @@ def build_teacher_model(args, train_ds, device, rank, kd_outputs):
 
         ckpt = torch.load(args.teacher_checkpoint, map_location="cpu", weights_only=False)
         sd = _extract_checkpoint_state_dict(ckpt)
-        missing, unexpected = unwrap_ddp(teacher).load_state_dict(sd, strict=False)
+        missing, unexpected = unwrap_distributed_model(teacher).load_state_dict(sd, strict=False)
         if rank == 0:
             print(
                 f">> Loaded teacher ({args.teacher_model}) from checkpoint. "
@@ -776,9 +498,9 @@ def build_teacher_model(args, train_ds, device, rank, kd_outputs):
 def forward_model_logits(model, x, *, arch, args, pe_cache=None, pe_scale=0.1):
     x_used = x
     if arch in ("ecgfm", "ecgfounder", "clef", "hubertecg", "fcn", "bilstm", "ai85tcn1d"):
-        x_used = zscore_per_sample_channel(x_used)
+        x_used = zscore_each_sample_channel(x_used)
 
-    x_in = make_student_input(x_used, arch=arch, pe_cache=pe_cache, pe_scale=pe_scale)
+    x_in = prepare_model_input(x_used, arch=arch, pe_cache=pe_cache, pe_scale=pe_scale)
     if arch == "physiowave":
         logits = model(x_in, task="downstream", task_name=args.task_type, return_logits=True)
     else:
@@ -791,63 +513,7 @@ def forward_model_logits(model, x, *, arch, args, pe_cache=None, pe_scale=0.1):
     return logits
 
 
-class CEPlusSoftF1Macro(nn.Module):
-    """
-    Single-label multiclass:
-      total_loss = CrossEntropyLoss + lam * (1 - SoftF1_macro_ovr)
-
-    SoftF1 is computed per class in an OvR manner using softmax probabilities,
-    then macro-averaged across classes.
-    """
-    def __init__(
-        self,
-        num_classes: int,
-        lam: float = 0.25,
-        weight: torch.Tensor | None = None,   # class weights for CE, shape [C]
-        ignore_index: int = -100,
-        eps: float = 1e-8,
-        ce_reduction: str = "mean",
-    ):
-        super().__init__()
-        self.num_classes = num_classes
-        self.lam = lam
-        self.ignore_index = ignore_index
-        self.eps = eps
-        self.ce = nn.CrossEntropyLoss(
-            weight=weight,
-            ignore_index=ignore_index,
-            reduction=ce_reduction,
-        )
-
-    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        logits: [B, C]
-        target: [B] (int64)
-        """
-        ce_loss = self.ce(logits, target)
-
-        if self.ignore_index is not None and self.ignore_index >= 0:
-            valid = target != self.ignore_index
-            logits = logits[valid]
-            target = target[valid]
-            if target.numel() == 0:
-                return ce_loss  # nothing to compute for soft-F1
-
-        probs = F.softmax(logits, dim=1)  # [B, C]
-        y = F.one_hot(target, num_classes=self.num_classes).float()  # [B, C]
-
-        tp = (probs * y).sum(dim=0)                 # [C]
-        fp = (probs * (1.0 - y)).sum(dim=0)         # [C]
-        fn = ((1.0 - probs) * y).sum(dim=0)         # [C]
-
-        f1_per_class = (2.0 * tp) / (2.0 * tp + fp + fn + self.eps)  # [C]
-        soft_f1_macro = f1_per_class.mean()
-
-        soft_f1_loss = 1.0 - soft_f1_macro
-        total = ce_loss + (self.lam * soft_f1_loss)
-        return total
-    
-def load_physiowave(num_classes: int, in_channels: int = 8):
+def build_physiowave_student(num_classes: int, in_channels: int = 8):
     rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{rank}")
 
@@ -944,12 +610,12 @@ def main_worker(rank, world_size, args):
         if rank == 0:
             print(f">> Using cached teacher logits: {args.teacher_logits_h5} key={args.teacher_logits_key}")
 
-        train_ds = TeacherLogitsWrapperDataset(train_ds, args.teacher_logits_h5, args.teacher_logits_key)
+        train_ds = CachedTeacherLogitsDataset(train_ds, args.teacher_logits_h5, args.teacher_logits_key)
 
         if args.task_type == "multilabel":
-            train_collate_fn = collate_multilabel_with_tlogits
+            train_collate_fn = collate_multilabel_with_teacher_logits
         else:
-            train_collate_fn = collate_singlelabel_with_tlogits
+            train_collate_fn = collate_singlelabel_with_teacher_logits
 
     def _pp_enabled_for_arch(pp_apply_to: str, arch: str) -> bool:
         if pp_apply_to in ("none",):
@@ -961,10 +627,10 @@ def main_worker(rank, world_size, args):
     if args.pp_mode != "none" and _pp_enabled_for_arch(args.pp_apply_to, args.student_arch):
         if rank == 0:
             print(f">> Preprocessing enabled: mode={args.pp_mode} apply_to={args.pp_apply_to} fs={args.pp_fs}")
-        train_ds = PreprocessWrapperDataset(train_ds, mode=args.pp_mode, fs=args.pp_fs, args=args)
-        val_ds   = PreprocessWrapperDataset(val_ds,   mode=args.pp_mode, fs=args.pp_fs, args=args)
+        train_ds = SignalPreprocessingDataset(train_ds, mode=args.pp_mode, fs=args.pp_fs, args=args)
+        val_ds   = SignalPreprocessingDataset(val_ds,   mode=args.pp_mode, fs=args.pp_fs, args=args)
         if test_ds is not None:
-            test_ds = PreprocessWrapperDataset(test_ds, mode=args.pp_mode, fs=args.pp_fs, args=args)
+            test_ds = SignalPreprocessingDataset(test_ds, mode=args.pp_mode, fs=args.pp_fs, args=args)
 
     if rank == 0:
         print(f"Train/Val/Test: {len(train_ds)}/{len(val_ds)}/{len(test_ds) if test_ds else 0}")
@@ -1026,7 +692,7 @@ def main_worker(rank, world_size, args):
         print(">> Skipping online teacher forward (cached logits will be used).")
 
     if args.student_arch == "physiowave":
-        student, pe_cache = load_physiowave(
+        student, pe_cache = build_physiowave_student(
             num_classes=train_ds.num_classes,
             in_channels=args.in_channels,
         )
@@ -1038,11 +704,11 @@ def main_worker(rank, world_size, args):
         with torch.no_grad():
             x0, _ = train_ds[0]
             x0 = x0.unsqueeze(0).to(device)  # [1,V,T]
-            x0 = zscore_per_sample_channel(x0)
-            x_in = make_student_input(x0, arch=args.student_arch, pe_cache=pe_cache, pe_scale=args.student_pe_scale)
+            x0 = zscore_each_sample_channel(x0)
+            x_in = prepare_model_input(x0, arch=args.student_arch, pe_cache=pe_cache, pe_scale=args.student_pe_scale)
             _ = student(x_in)
     
-        base = unwrap_ddp(student)
+        base = unwrap_distributed_model(student)
         
         for p in base.parameters():
             p.requires_grad = True
@@ -1067,7 +733,7 @@ def main_worker(rank, world_size, args):
 
     n_trainable = sum(p.numel() for p in student.parameters() if p.requires_grad)
     print("trainable params:", n_trainable)
-    for name, p in unwrap_ddp(student).named_parameters():
+    for name, p in unwrap_distributed_model(student).named_parameters():
         if p.requires_grad:
             print("trainable:", name, p.shape)
 
@@ -1145,9 +811,9 @@ def main_worker(rank, world_size, args):
             y = y.to(device)
 
             if args.student_arch in ("ecgfm", "ecgfounder", "clef", "hubertecg", "fcn", "bilstm", "ai85tcn1d"):
-                x = zscore_per_sample_channel(x)
+                x = zscore_each_sample_channel(x)
 
-            x_in = make_student_input(x, arch=args.student_arch, pe_cache=pe_cache, pe_scale=args.student_pe_scale)
+            x_in = prepare_model_input(x, arch=args.student_arch, pe_cache=pe_cache, pe_scale=args.student_pe_scale)
 
             is_accum = ((step + 1) % args.accum_steps == 0)
             sync_ctx = (student.no_sync() if isinstance(student, DDP) and not is_accum else nullcontext())
@@ -1163,7 +829,7 @@ def main_worker(rank, world_size, args):
                     t_logits = t_logits_cached.to(device, non_blocking=True)
                 elif teacher is not None:
                     with torch.inference_mode():
-                        with autocast_ctx(enabled=(amp_enabled and device.type == "cuda"), dtype=amp_dtype):
+                        with cuda_autocast_context(enabled=(amp_enabled and device.type == "cuda"), dtype=amp_dtype):
                             t_logits = forward_model_logits(
                                 teacher,
                                 x_used,
@@ -1173,9 +839,9 @@ def main_worker(rank, world_size, args):
                                 pe_scale=args.teacher_pe_scale,
                             )
 
-                x_in = make_student_input(x_used, arch=args.student_arch, pe_cache=pe_cache, pe_scale=args.student_pe_scale)
+                x_in = prepare_model_input(x_used, arch=args.student_arch, pe_cache=pe_cache, pe_scale=args.student_pe_scale)
 
-                with autocast_ctx(enabled=(amp_enabled and device.type == "cuda"), dtype=amp_dtype):
+                with cuda_autocast_context(enabled=(amp_enabled and device.type == "cuda"), dtype=amp_dtype):
                     if args.student_arch == "physiowave":
                         pw_task = "multilabel" if args.task_type == "multilabel" else "classification"
                         s_logits = student(
@@ -1199,15 +865,15 @@ def main_worker(rank, world_size, args):
                     elif s_logits.dim() == 4:
                         s_logits = s_logits.flatten(2).mean(-1)
 
-                    s_logits_f = fp32(s_logits)
-                    t_logits_f = fp32(t_logits) if (t_logits is not None) else None
+                    s_logits_f = to_float32(s_logits)
+                    t_logits_f = to_float32(t_logits) if (t_logits is not None) else None
 
                     if args.task_type == "classification":
                         hard_loss = hard_criterion(s_logits_f, y)   # or your soft-target CE if using mixup
-                        soft_loss = kd_ce(s_logits_f, t_logits_f, T=args.temperature) if (t_logits_f is not None) else 0.0
+                        soft_loss = distillation_kl_loss(s_logits_f, t_logits_f, T=args.temperature) if (t_logits_f is not None) else 0.0
                     else:
                         hard_loss = hard_criterion(s_logits_f, y.float())
-                        soft_loss = kd_bce_with_logits(s_logits_f, t_logits_f, T=args.temperature) if (t_logits_f is not None) else 0.0
+                        soft_loss = distillation_bce_loss(s_logits_f, t_logits_f, T=args.temperature) if (t_logits_f is not None) else 0.0
 
                     alpha = float(args.alpha_kd)
                     loss = (1.0 - alpha) * hard_loss + (alpha * soft_loss if (t_logits_f is not None) else 0.0)
@@ -1252,7 +918,7 @@ def main_worker(rank, world_size, args):
 
         if rank == 0:
             val_metrics = eval_unified(
-                epoch, rank, unwrap_ddp(student), val_loader, device, hard_criterion,
+                epoch, rank, unwrap_distributed_model(student), val_loader, device, hard_criterion,
                 threshold=args.threshold, desc_prefix="Val",
                 task_type=args.task_type, pe_cache=pe_cache,
                 student_arch=args.student_arch, pe_scale=args.student_pe_scale,
@@ -1271,7 +937,7 @@ def main_worker(rank, world_size, args):
                 best_metric = val_metric
                 save_path = os.path.join(args.output_dir, "best_student.pth")
 
-                base_student = unwrap_ddp(student)
+                base_student = unwrap_distributed_model(student)
 
                 torch.save({
                     "epoch": epoch,
@@ -1295,9 +961,9 @@ def main_worker(rank, world_size, args):
     if rank == 0 and test_loader is not None:
         print("\n===> Testing best student <===")
         ckpt = torch.load(os.path.join(args.output_dir, "best_student.pth"), map_location="cpu", weights_only=False)
-        unwrap_ddp(student).load_state_dict(ckpt["student_state_dict"])
+        unwrap_distributed_model(student).load_state_dict(ckpt["student_state_dict"])
         test_metrics = eval_unified(
-            "Test", rank, unwrap_ddp(student), test_loader, device, hard_criterion,
+            "Test", rank, unwrap_distributed_model(student), test_loader, device, hard_criterion,
             threshold=args.threshold, desc_prefix="Test",
             task_type=args.task_type, pe_cache=pe_cache,
             student_arch=args.student_arch, pe_scale=args.student_pe_scale,
@@ -1389,9 +1055,9 @@ def main(argv=None):
     p.add_argument(
         "--student_arch",
         type=str,
-        default="physiowavenpu",
+        default="physiolite",
         choices=[
-            "physiowavenpu",
+            "physiolite",
             "physiowave",
         ],
     )
@@ -1401,7 +1067,7 @@ def main(argv=None):
         default="physiowave",
         choices=[
             "physiowave",
-            "physiowavenpu", 
+            "physiolite",
         ],
         help="Teacher backbone used for KD logits. 'physiowave' uses the original BERTWavelet teacher loader.",
     )
@@ -1410,7 +1076,7 @@ def main(argv=None):
         type=str,
         default="auto",
         choices=["none", "auto", "uci", "db5", "epn612", "ptb", "cpsc", "chapman"],
-        help="Dataset-tuned PhysioWaveNPU settings. When set, overrides patch/front-pool/post-pool/pos-freqs.",
+        help="Dataset-tuned PhysioLite settings. When set, overrides patch/front-pool/post-pool/pos-freqs.",
     )
     p.add_argument("--patch_size", type=int, default=40)
     p.add_argument("--student_embed_dim", type=int, default=256)
@@ -1453,7 +1119,7 @@ def main(argv=None):
     p.add_argument("--pp_zscore", action="store_true", default=False,
                 help="Apply ECGFounder-style global zscore after filtering.")
     p.add_argument("--pp_zscore_per_channel", action="store_true", default=False,
-                help="Additionally apply your zscore_per_sample_channel() in the training loop (torch).")
+                help="Additionally apply per-sample, per-channel z-score normalization in the training loop.")
 
     p.add_argument("--baseline_width", type=int, default=128, help="Base channel/hidden width for baseline models.")
     p.add_argument("--baseline_depth", type=int, default=6, help="Depth for TCN/ConvNeXt1D blocks.")

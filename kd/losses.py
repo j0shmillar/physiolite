@@ -3,13 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def kd_ce(student_logits, teacher_logits, T=1.0):
+def distillation_kl_loss(student_logits, teacher_logits, T=1.0):
     s = F.log_softmax(student_logits / T, dim=1)
     t = F.softmax(teacher_logits / T, dim=1)
     return F.kl_div(s, t, reduction='batchmean') * (T * T)
 
 
-def kd_bce_with_logits(student_logits, teacher_logits, T=1.0):
+def distillation_bce_loss(student_logits, teacher_logits, T=1.0):
     if T <= 0:
         T = 1.0
     with torch.no_grad():
@@ -17,7 +17,7 @@ def kd_bce_with_logits(student_logits, teacher_logits, T=1.0):
     return F.binary_cross_entropy_with_logits(student_logits / T, soft_targets, reduction='mean') * (T * T)
 
 
-class CEPlusSoftF1Macro(nn.Module):
+class CrossEntropyWithSoftMacroF1Loss(nn.Module):
     def __init__(
         self,
         num_classes: int,

@@ -22,7 +22,7 @@ def main():
     ap.add_argument("--teacher_checkpoint", required=True, help="Path to teacher checkpoint (same as KD script)")
     ap.add_argument("--out_h5", required=True, help="Where to write logits (HDF5)")
     ap.add_argument("--task_type", default="classification", choices=["classification", "multilabel"])
-    ap.add_argument("--teacher_model", default="physiowave", choices=["physiowave", "physiowavenpu"])
+    ap.add_argument("--teacher_model", default="physiowave", choices=["physiowave", "physiolite"])
     ap.add_argument("--teacher_dataset_profile", default="auto",
                     choices=["none", "auto", "uci", "db5", "epn612", "ptb", "cpsc", "chapman"])
     ap.add_argument("--data_key", default="data")

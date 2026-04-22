@@ -5,7 +5,6 @@ import os
 import torch
 
 from models.physiowave import BERTWaveletTransformer
-from .common import patch_wavelet_modules_io
 
 
 def _extract_teacher_checkpoint_state_dict(ckpt_obj):
@@ -212,4 +211,3 @@ def load_physiowave():
         print("Frozen encoder parameters (excluding task heads)")
 
     return model, None
-

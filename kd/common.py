@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
 import math
-import os
 import random
-import sys
 from contextlib import nullcontext
 
 import numpy as np
@@ -13,11 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def fp32(x: torch.Tensor) -> torch.Tensor:
+def to_float32(x: torch.Tensor) -> torch.Tensor:
     return x.float() if isinstance(x, torch.Tensor) and x.dtype != torch.float32 else x
 
 
-def autocast_ctx(*, enabled: bool, dtype: torch.dtype):
+def cuda_autocast_context(*, enabled: bool, dtype: torch.dtype):
     if not enabled:
         return nullcontext()
     if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
@@ -25,7 +22,7 @@ def autocast_ctx(*, enabled: bool, dtype: torch.dtype):
     return torch.cuda.amp.autocast(dtype=dtype)
 
 
-def set_random_seed(seed: int):
+def seed_everything(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -33,7 +30,7 @@ def set_random_seed(seed: int):
 
 
 @torch.no_grad()
-def make_posenc_1d_concat(num_freq: int, T: int, device, dtype=torch.float32):
+def make_1d_sincos_positional_channels(num_freq: int, T: int, device, dtype=torch.float32):
     num_freq = int(num_freq)
     if num_freq <= 0:
         return None
@@ -64,42 +61,24 @@ def parse_kernel_set(s: str) -> tuple[int, ...]:
     return ks
 
 
-def unwrap_ddp(m):
+def unwrap_distributed_model(m):
     return m.module if hasattr(m, "module") else m
 
 
-def zscore_per_sample_channel(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def zscore_each_sample_channel(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     mu = x.mean(dim=-1, keepdim=True)
     std = x.std(dim=-1, keepdim=True).clamp_min(eps)
     return (x - mu) / std
 
 
-def load_repo_module(repo_root: str, module_relpath: str, module_name: str):
-    module_path = os.path.join(repo_root, module_relpath)
-    if not os.path.isfile(module_path):
-        raise FileNotFoundError(f"Module not found: {module_path}")
-
-    repo_root = os.path.abspath(repo_root)
-    try:
-        sys.path.insert(0, repo_root)
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(mod)
-        return mod
-    finally:
-        if sys.path and sys.path[0] == repo_root:
-            sys.path.pop(0)
-
-
-def make_student_input(
+def prepare_model_input(
     x: torch.Tensor,
     *,
     arch: str,
     pe_cache: torch.Tensor | None,
     pe_scale: float,
 ):
-    if arch == "physiowavenpu":
+    if arch == "physiolite":
         if pe_cache is None:
             return x
         pe = pe_cache.unsqueeze(0).expand(x.size(0), -1, -1)
@@ -132,7 +111,7 @@ def make_student_input(
     raise ValueError(f"Unknown student arch: {arch}")
 
 
-def patch_wavelet_modules_io(model: nn.Module, *, rank: int = 0) -> dict:
+def align_wavelet_module_inputs(model: nn.Module, *, rank: int = 0) -> dict:
     counts = {"conv1d": 0, "linear": 0}
 
     def _pre_hook(mod, inputs):
@@ -163,5 +142,5 @@ def patch_wavelet_modules_io(model: nn.Module, *, rank: int = 0) -> dict:
             counts["linear"] += 1
 
     if rank == 0:
-        print(f">> Patched wavelet IO: hooked Conv1d={counts['conv1d']} Linear={counts['linear']}")
+        print(f">> Aligned wavelet IO: hooked Conv1d={counts['conv1d']} Linear={counts['linear']}")
     return counts
