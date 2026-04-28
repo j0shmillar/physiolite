@@ -233,12 +233,10 @@ class PhysioLite(nn.Module):
 
         if patch_t > 16 and post_patch_pool_t is None:
             raise AssertionError(
-                "patch_t > 16 is not supported on MAX78000. Choose patch_t in [1..16] and, if needed, set post_patch_pool_t to further downsample."
+                "patch_t > 16 is not supported. Choose patch_t in [1..16] and, if needed, set post_patch_pool_t to further downsample."
             )
         
         if legacy_bank_front_pool_bug:
-            # Reproduce historical behavior from older scripts where front_pool_k
-            # was not forwarded into Bank (bank defaulted to 3).
             self.bank = Bank(
                 in_channels,
                 bank_ch=bank_ch,
